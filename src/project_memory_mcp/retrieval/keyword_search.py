@@ -87,17 +87,18 @@ class KeywordSearchService:
         )
 
         # 2. shared scope
+        internal_limit = max(max_results * 3, 50)
         if include_shared:
             all_results.extend(
                 self._search_shared_scope(
-                    keywords, project_id, modules, types, tags, min_confidence,
+                    keywords, project_id, modules, types, tags, min_confidence, internal_limit,
                 )
             )
 
         # 3. global scope
         if include_global:
             all_results.extend(
-                self._search_global_scope(keywords, modules, types, tags, min_confidence)
+                self._search_global_scope(keywords, modules, types, tags, min_confidence, internal_limit)
             )
 
         # 去重（同 id 取最高分）
@@ -168,18 +169,18 @@ class KeywordSearchService:
         return self._execute_search(clause, keywords, project_id, max_results)
 
     def _search_shared_scope(
-        self, keywords, project_id, modules, types, tags, min_confidence,
+        self, keywords, project_id, modules, types, tags, min_confidence, limit,
     ) -> list[SearchResult]:
         clause = FilterBuilder.build_shared_filter(
             project_id, modules, types, tags, min_confidence,
         )
-        return self._execute_search(clause, keywords, project_id, 20)
+        return self._execute_search(clause, keywords, project_id, limit)
 
     def _search_global_scope(
-        self, keywords, modules, types, tags, min_confidence,
+        self, keywords, modules, types, tags, min_confidence, limit,
     ) -> list[SearchResult]:
         clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
-        return self._execute_search(clause, keywords, None, 20)
+        return self._execute_search(clause, keywords, None, limit)
 
     def _execute_search(
         self,

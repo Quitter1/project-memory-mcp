@@ -1,0 +1,117 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 87d645b..934eadd 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -260,7 +260,12 @@ git commit -m "phase 0-{n} {阶段名}"
+ 
+ ```bash
+ git add .
+-git commit -m "phase 0-3.2 search foundation"
++git commit -m "phase 3.3 search limit fixes"
+ ```
+ 
++后续每个阶段单独 commit，例如：
++- `phase 3.2 search edge-case fixes`
++- `phase 3.3 search limit fixes`
++- `phase 4 knowledge governance`
++
+ 这样后续阶段的 `git diff` 才真正有价值。
+\ No newline at end of file
+diff --git a/src/project_memory_mcp/retrieval/keyword_search.py b/src/project_memory_mcp/retrieval/keyword_search.py
+index 02b3b5e..996f0d4 100644
+--- a/src/project_memory_mcp/retrieval/keyword_search.py
++++ b/src/project_memory_mcp/retrieval/keyword_search.py
+@@ -87,17 +87,18 @@ class KeywordSearchService:
+         )
+ 
+         # 2. shared scope
++        internal_limit = max(max_results * 3, 50)
+         if include_shared:
+             all_results.extend(
+                 self._search_shared_scope(
+-                    keywords, project_id, modules, types, tags, min_confidence,
++                    keywords, project_id, modules, types, tags, min_confidence, internal_limit,
+                 )
+             )
+ 
+         # 3. global scope
+         if include_global:
+             all_results.extend(
+-                self._search_global_scope(keywords, modules, types, tags, min_confidence)
++                self._search_global_scope(keywords, modules, types, tags, min_confidence, internal_limit)
+             )
+ 
+         # 去重（同 id 取最高分）
+@@ -168,18 +169,18 @@ class KeywordSearchService:
+         return self._execute_search(clause, keywords, project_id, max_results)
+ 
+     def _search_shared_scope(
+-        self, keywords, project_id, modules, types, tags, min_confidence,
++        self, keywords, project_id, modules, types, tags, min_confidence, limit,
+     ) -> list[SearchResult]:
+         clause = FilterBuilder.build_shared_filter(
+             project_id, modules, types, tags, min_confidence,
+         )
+-        return self._execute_search(clause, keywords, project_id, 20)
++        return self._execute_search(clause, keywords, project_id, limit)
+ 
+     def _search_global_scope(
+-        self, keywords, modules, types, tags, min_confidence,
++        self, keywords, modules, types, tags, min_confidence, limit,
+     ) -> list[SearchResult]:
+         clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
+-        return self._execute_search(clause, keywords, None, 20)
++        return self._execute_search(clause, keywords, None, limit)
+ 
+     def _execute_search(
+         self,
+diff --git a/tests/test_search.py b/tests/test_search.py
+index 263469e..89e2c45 100644
+--- a/tests/test_search.py
++++ b/tests/test_search.py
+@@ -624,3 +624,45 @@ class TestLikeEscape:
+                 if "下划线标签" == i["title"]:
+                     any_match = True
+         assert any_match, "tag with _ should match query _"
++
++# ------------------------------------------------------------------
++# Phase 3.3 新增：shared/global 大结果不被固定 limit 截断
++# ------------------------------------------------------------------
++
++class TestLargeSharedGlobal:
++    """验证 shared/global 不因内部 limit=20 被截断。"""
++
++    def test_40_shared_large_results_not_truncated(self, project_repo, memory_repo, search_svc):
++        """60 条 shared 知识，max_results=50 应返回 50。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        for i in range(60):
++            content = f'shared common keyword item {i}'
++            item = MemoryItem(
++                project_id='shared', title=f'共享知识{i}', content=content,
++                content_hash=compute_content_hash(content), status='approved',
++                scope='shared', source_type='manual_input',
++                allowed_projects=['proj-a'], denied_projects=[]
++            )
++            memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "shared common keyword", max_results=50)
++        assert result.total_returned == 50
++        assert len(result.context_pack["shared_context"]) == 50
++
++    def test_41_global_large_results_not_truncated(self, project_repo, memory_repo, search_svc):
++        """60 条 global 知识，max_results=50 应返回 50。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        for i in range(60):
++            content = f'global common keyword item {i}'
++            item = MemoryItem(
++                project_id='shared', title=f'全局知识{i}', content=content,
++                content_hash=compute_content_hash(content), status='approved',
++                scope='global', source_type='manual_input'
++            )
++            memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "global common keyword", max_results=50)
++        assert result.total_returned == 50
++        assert len(result.context_pack["global_context"]) == 50

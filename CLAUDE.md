@@ -260,7 +260,12 @@ git commit -m "phase 0-{n} {阶段名}"
 
 ```bash
 git add .
-git commit -m "phase 0-3.2 search foundation"
+git commit -m "phase 3.3 search limit fixes"
 ```
+
+后续每个阶段单独 commit，例如：
+- `phase 3.2 search edge-case fixes`
+- `phase 3.3 search limit fixes`
+- `phase 4 knowledge governance`
 
 这样后续阶段的 `git diff` 才真正有价值。

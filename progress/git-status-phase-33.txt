@@ -1,0 +1,15 @@
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   CLAUDE.md
+	modified:   src/project_memory_mcp/retrieval/keyword_search.py
+	modified:   tests/test_search.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	bash.exe.stackdump
+	progress/phase-33-summary.md
+	progress/tree-phase-33.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

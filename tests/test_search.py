@@ -624,3 +624,45 @@ class TestLikeEscape:
                 if "下划线标签" == i["title"]:
                     any_match = True
         assert any_match, "tag with _ should match query _"
+
+# ------------------------------------------------------------------
+# Phase 3.3 新增：shared/global 大结果不被固定 limit 截断
+# ------------------------------------------------------------------
+
+class TestLargeSharedGlobal:
+    """验证 shared/global 不因内部 limit=20 被截断。"""
+
+    def test_40_shared_large_results_not_truncated(self, project_repo, memory_repo, search_svc):
+        """60 条 shared 知识，max_results=50 应返回 50。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        for i in range(60):
+            content = f'shared common keyword item {i}'
+            item = MemoryItem(
+                project_id='shared', title=f'共享知识{i}', content=content,
+                content_hash=compute_content_hash(content), status='approved',
+                scope='shared', source_type='manual_input',
+                allowed_projects=['proj-a'], denied_projects=[]
+            )
+            memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "shared common keyword", max_results=50)
+        assert result.total_returned == 50
+        assert len(result.context_pack["shared_context"]) == 50
+
+    def test_41_global_large_results_not_truncated(self, project_repo, memory_repo, search_svc):
+        """60 条 global 知识，max_results=50 应返回 50。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        for i in range(60):
+            content = f'global common keyword item {i}'
+            item = MemoryItem(
+                project_id='shared', title=f'全局知识{i}', content=content,
+                content_hash=compute_content_hash(content), status='approved',
+                scope='global', source_type='manual_input'
+            )
+            memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "global common keyword", max_results=50)
+        assert result.total_returned == 50
+        assert len(result.context_pack["global_context"]) == 50
