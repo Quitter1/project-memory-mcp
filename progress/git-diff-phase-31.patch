@@ -1,0 +1,1367 @@
+diff --git a/scripts/make_review_pack.py b/scripts/make_review_pack.py
+index 42b2d59..2a23807 100644
+--- a/scripts/make_review_pack.py
++++ b/scripts/make_review_pack.py
+@@ -41,16 +41,18 @@ def run_cmd(cmd_str: str) -> tuple[int, str, str]:
+     """运行命令，返回 (returncode, stdout, stderr)。"""
+     # Windows 下用 shell=True 保证 pytest 等工具可用
+     env = os.environ.copy()
++    env.setdefault("PYTHONUTF8", "1")
+     env.setdefault("PYTHONIOENCODING", "utf-8")
+     result = subprocess.run(
+         cmd_str,
+         cwd=PROJECT_ROOT,
+         capture_output=True,
+-        text=True,
++        encoding="utf-8",
++        errors="replace",
+         shell=True,
+         env=env,
+     )
+-    return result.returncode, result.stdout, result.stderr
++    return result.returncode, result.stdout or "", result.stderr or ""
+ 
+ 
+ def generate_tree(phase: int) -> Path:
+diff --git a/src/project_memory_mcp/models/search_result.py b/src/project_memory_mcp/models/search_result.py
+index 62f307d..5dcad45 100644
+--- a/src/project_memory_mcp/models/search_result.py
++++ b/src/project_memory_mcp/models/search_result.py
+@@ -29,6 +29,7 @@ class SearchResultSet:
+     project_id: str = ""
+     project_resolved: bool = False
+     context_pack: dict = field(default_factory=dict)
+-    total_found: int = 0
++    total_found: int = 0        # 检索命中总数（截断前）
++    total_returned: int = 0     # 实际返回总数（截断后）
+     search_method: str = "keyword"
+     fallback_activated: bool = False
+diff --git a/src/project_memory_mcp/retrieval/__init__.py b/src/project_memory_mcp/retrieval/__init__.py
+index 30cb305..7661c80 100644
+--- a/src/project_memory_mcp/retrieval/__init__.py
++++ b/src/project_memory_mcp/retrieval/__init__.py
+@@ -2,6 +2,12 @@
+ 
+ from .search import KnowledgeSearchService
+ from .keyword_search import KeywordSearchService
++from .filter_builder import FilterBuilder
+ from .ranker import ResultRanker
+ 
+-__all__ = ["KnowledgeSearchService", "KeywordSearchService", "ResultRanker"]
++__all__ = [
++    "KnowledgeSearchService",
++    "KeywordSearchService",
++    "FilterBuilder",
++    "ResultRanker",
++]
+diff --git a/src/project_memory_mcp/retrieval/filter_builder.py b/src/project_memory_mcp/retrieval/filter_builder.py
+index 3000803..7121581 100644
+--- a/src/project_memory_mcp/retrieval/filter_builder.py
++++ b/src/project_memory_mcp/retrieval/filter_builder.py
+@@ -1,9 +1,170 @@
+-"""过滤条件构建 — scope、project_id、status、type、module、tags。"""
++"""FilterBuilder — 构建参数化 SQL WHERE 子句，按 project/shared/global 三级过滤。"""
++
++
++class FilterClause:
++    """参数化 SQL 片段：(where_sql, params_list)。"""
++
++    def __init__(self, sql: str, params: list):
++        self.sql = sql
++        self.params = params
+ 
+ 
+ class FilterBuilder:
+-    """构建 SQL WHERE 子句和 Qdrant filter。"""
++    """
++    构建检索过滤条件。
++
++    三级范围：
++    - project: scope=project, project_id=current
++    - shared: scope=shared, allowed_projects 包含 current
++    - global: scope=global
++    """
++
++    # 默认排除的状态（除非 include_candidates=True 或显式传入）
++    DEFAULT_EXCLUDE_STATUSES = {"rejected", "deprecated", "superseded", "conflict"}
++
++    # include_candidates=True 时允许的额外状态
++    CANDIDATE_STATUSES = {"candidate", "pending_review"}
++
++    # 基础状态（始终允许，不受 include_candidates 影响）
++    BASE_STATUSES = {"approved"}
++
++    @classmethod
++    def build_project_filter(
++        cls,
++        project_id: str,
++        include_candidates: bool = False,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        min_confidence: float | None = None,
++    ) -> FilterClause:
++        """
++        scope=project + project_id=current。
++
++        返回 (sql, params)。
++        """
++        conditions = ["scope = 'project'", "project_id = ?"]
++        params: list = [project_id]
++
++        # 状态过滤
++        status_sql, status_params = cls._status_clause(include_candidates)
++        conditions.append(status_sql)
++        params.extend(status_params)
++
++        # 可选过滤
++        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        conditions.append(extra_sql)
++        params.extend(extra_params)
++
++        where = " AND ".join(conditions)
++        return FilterClause(where, params)
++
++    @classmethod
++    def build_shared_filter(
++        cls,
++        project_id: str,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        min_confidence: float | None = None,
++    ) -> FilterClause:
++        """
++        scope=shared + status=approved。
++
++        allowed_projects 为空（全部允许）或包含当前 project_id。
++        denied_projects 不包含当前 project_id。
++        """
++        conditions = [
++            "scope = 'shared'",
++            "status = 'approved'",
++            # allowed: 空 JSON 数组 或 包含 project_id（instr 精确匹配，避免 LIKE 通配符）
++            "(allowed_projects = '[]' OR instr(allowed_projects, ?) > 0)",
++            # denied: 不包含 project_id
++            "(denied_projects = '[]' OR instr(denied_projects, ?) = 0)",
++        ]
++        project_id_pattern = f'"{project_id}"'
++        params: list = [project_id_pattern, project_id_pattern]
++
++        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        conditions.append(extra_sql)
++        params.extend(extra_params)
++
++        where = " AND ".join(conditions)
++        return FilterClause(where, params)
++
++    @classmethod
++    def build_global_filter(
++        cls,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        min_confidence: float | None = None,
++    ) -> FilterClause:
++        """scope=global + status=approved。"""
++        conditions = ["scope = 'global'", "status = 'approved'"]
++        params: list = []
++
++        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        conditions.append(extra_sql)
++        params.extend(extra_params)
++
++        where = " AND ".join(conditions)
++        return FilterClause(where, params)
++
++    @classmethod
++    def build_tag_filter(
++        cls,
++        tags: list[str],
++    ) -> FilterClause:
++        """
++        标签过滤 — 通过 memory_tags 子查询。
++
++        注意：此过滤在三级范围外单独叠加。
++        """
++        if not tags:
++            return FilterClause("1=1", [])
++        placeholders = ", ".join("?" for _ in tags)
++        # 使用 memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (...))
++        sql = f"id IN (SELECT DISTINCT memory_id FROM memory_tags WHERE tag IN ({placeholders}))"
++        return FilterClause(sql, list(tags))
++
++    # ------------------------------------------------------------------
++    # 内部工具
++    # ------------------------------------------------------------------
++
++    @classmethod
++    def _status_clause(cls, include_candidates: bool) -> tuple[str, list]:
++        """构建状态过滤 SQL 片段，返回 (sql, params)。"""
++        allowed = set(cls.BASE_STATUSES)
++        if include_candidates:
++            allowed.update(cls.CANDIDATE_STATUSES)
++        statuses = sorted(allowed)
++        placeholders = ", ".join("?" for _ in statuses)
++        return f"status IN ({placeholders})", statuses
++
++    @classmethod
++    def _optional_filters(
++        cls,
++        modules: list[str] | None,
++        types: list[str] | None,
++        tags: list[str] | None,
++        min_confidence: float | None,
++    ) -> tuple[str, list]:
++        """构建可选过滤条件。返回 (sql, params)。"""
++        parts: list[str] = []
++        params: list = []
++
++        if modules:
++            placeholders = ", ".join("?" for _ in modules)
++            parts.append(f"module IN ({placeholders})")
++            params.extend(modules)
++
++        if types:
++            placeholders = ", ".join("?" for _ in types)
++            parts.append(f"type IN ({placeholders})")
++            params.extend(types)
++
++        if min_confidence is not None:
++            parts.append("confidence >= ?")
++            params.append(min_confidence)
+ 
+-    # TODO: 阶段 3 实现
+-    # build_sql_where(project_id, **filters) -> tuple[str, list]
+-    # build_qdrant_filter(project_id, **filters) -> dict
++        if parts:
++            return " AND ".join(parts), params
++        return "1=1", []
+diff --git a/src/project_memory_mcp/retrieval/keyword_search.py b/src/project_memory_mcp/retrieval/keyword_search.py
+index 84c0c27..603f91d 100644
+--- a/src/project_memory_mcp/retrieval/keyword_search.py
++++ b/src/project_memory_mcp/retrieval/keyword_search.py
+@@ -1,13 +1,295 @@
+-"""SQLite keyword search — 基于 LIKE/FTS 的保底搜索。"""
++"""KeywordSearchService — SQLite LIKE 搜索，参数化查询，多字段打分。"""
+ 
++import json
++import re
+ import sqlite3
+ 
++from ..models.search_result import SearchResult
++from .filter_builder import FilterBuilder
++
++_TOKENIZE_RE = re.compile(r"\s+")
++
+ 
+ class KeywordSearchService:
+-    """SQLite keyword search，永远可用，不依赖外部服务。"""
++    """
++    SQLite keyword search（保底可用，不依赖外部服务）。
++
++    匹配字段 + 权重：
++    - title: +10
++    - tags: +8
++    - module: +5
++    - type: +3
++    - content: +2
++    - source_file: +2
++    """
++
++    FIELD_WEIGHTS = [
++        ("title", 10),
++        ("module", 5),
++        ("type", 3),
++        ("content", 2),
++        ("source_file", 2),
++    ]
++    TAG_WEIGHT = 8
+ 
+     def __init__(self, conn: sqlite3.Connection):
+         self.conn = conn
+ 
+-    # TODO: 阶段 3 实现
+-    # search(project_id, query, **filters) -> list[SearchResult]
++    # ------------------------------------------------------------------
++    # 公开 API
++    # ------------------------------------------------------------------
++
++    def search(
++        self,
++        project_id: str,
++        query: str,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        tags: list[str] | None = None,
++        max_results: int = 10,
++        min_confidence: float | None = None,
++        include_shared: bool = True,
++        include_global: bool = True,
++        include_candidates: bool = False,
++    ) -> list[SearchResult]:
++        """执行 keyword search，返回按分数降序的 SearchResult 列表。"""
++        keywords = self._tokenize(query)
++        all_results: list[SearchResult] = []
++
++        # 1. project scope
++        all_results.extend(
++            self._search_project_scope(
++                project_id, keywords,
++                include_candidates, modules, types, min_confidence, max_results,
++            )
++        )
++
++        # 2. shared scope
++        if include_shared:
++            all_results.extend(
++                self._search_shared_scope(
++                    keywords, project_id, modules, types, min_confidence,
++                )
++            )
++
++        # 3. global scope
++        if include_global:
++            all_results.extend(
++                self._search_global_scope(keywords, modules, types, min_confidence)
++            )
++
++        # 标签过滤
++        if tags:
++            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
++
++        # 去重（同 id 取最高分）
++        seen: dict[str, SearchResult] = {}
++        for r in all_results:
++            if r.id not in seen or r.relevance_score > seen[r.id].relevance_score:
++                seen[r.id] = r
++
++        deduped = list(seen.values())
++        deduped.sort(key=lambda x: -x.relevance_score)
++        # 不在此处截断，由 KnowledgeSearchService 统一按 max_results 截断
++        return deduped
++
++    def search_empty(
++        self,
++        project_id: str,
++        max_results: int = 10,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        tags: list[str] | None = None,
++        min_confidence: float | None = None,
++        include_shared: bool = True,
++        include_global: bool = True,
++        include_candidates: bool = False,
++    ) -> list[SearchResult]:
++        """空 query 按 updated_at 降序返回最近知识，遵守全部过滤规则。"""
++        all_results: list[SearchResult] = []
++
++        clause = FilterBuilder.build_project_filter(
++            project_id, include_candidates, modules, types, min_confidence,
++        )
++        rows = self.conn.execute(
++            f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
++            clause.params + [max_results],
++        ).fetchall()
++        all_results.extend(self._rows_to_results(rows, project_id))
++
++        if include_shared:
++            clause = FilterBuilder.build_shared_filter(
++                project_id, modules, types, min_confidence,
++            )
++            rows = self.conn.execute(
++                f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
++                clause.params + [max_results],
++            ).fetchall()
++            all_results.extend(self._rows_to_results(rows, project_id))
++
++        if include_global:
++            clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
++            rows = self.conn.execute(
++                f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
++                clause.params + [max_results],
++            ).fetchall()
++            all_results.extend(self._rows_to_results(rows, project_id))
++
++        # 标签过滤
++        if tags:
++            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
++
++        return all_results
++
++    # ------------------------------------------------------------------
++    # 内部：按 scope 搜索
++    # ------------------------------------------------------------------
++
++    def _search_project_scope(
++        self, project_id, keywords, include_candidates, modules, types, min_confidence, max_results,
++    ) -> list[SearchResult]:
++        clause = FilterBuilder.build_project_filter(
++            project_id, include_candidates, modules, types, min_confidence,
++        )
++        return self._execute_search(clause, keywords, project_id, max_results)
++
++    def _search_shared_scope(
++        self, keywords, project_id, modules, types, min_confidence,
++    ) -> list[SearchResult]:
++        clause = FilterBuilder.build_shared_filter(
++            project_id, modules, types, min_confidence,
++        )
++        return self._execute_search(clause, keywords, project_id, 20)
++
++    def _search_global_scope(
++        self, keywords, modules, types, min_confidence,
++    ) -> list[SearchResult]:
++        clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
++        return self._execute_search(clause, keywords, None, 20)
++
++    def _execute_search(
++        self,
++        clause,
++        keywords: list[str],
++        project_id: str | None,
++        limit: int,
++    ) -> list[SearchResult]:
++        """通用搜索执行：无关键词 → 排序返回；有关键词 → 打分排序。"""
++        if not keywords:
++            rows = self.conn.execute(
++                f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
++                clause.params + [limit],
++            ).fetchall()
++            return self._rows_to_results(rows, project_id)
++
++        score_parts, score_params = self._build_score(keywords)
++        where_conds, where_params = self._build_where(keywords)
++
++        # 顺序：SELECT 中的 score_params → WHERE clause → OR where_conds → LIMIT
++        params = score_params + clause.params + where_params + [limit * 2]
++        sql = (
++            f"SELECT *, ({' + '.join(score_parts)}) AS relevance_score "
++            f"FROM memory_items "
++            f"WHERE {clause.sql} AND ({' OR '.join(where_conds)}) "
++            f"ORDER BY relevance_score DESC LIMIT ?"
++        )
++
++        rows = self.conn.execute(sql, params).fetchall()
++        return self._rows_to_results(rows, project_id)
++
++    # ------------------------------------------------------------------
++    # 评分 + 命中条件构建
++    # ------------------------------------------------------------------
++
++    def _build_score(self, keywords: list[str]) -> tuple[list[str], list]:
++        """构建 SELECT 中的 CASE 打分表达式。"""
++        parts: list[str] = []
++        params: list = []
++        for field, weight in self.FIELD_WEIGHTS:
++            for kw in keywords:
++                parts.append(f"CASE WHEN {field} LIKE ? THEN {weight} ELSE 0 END")
++                params.append(f"%{kw}%")
++        for kw in keywords:
++            parts.append(
++                f"CASE WHEN id IN "
++                f"(SELECT memory_id FROM memory_tags WHERE tag LIKE ?) "
++                f"THEN {self.TAG_WEIGHT} ELSE 0 END"
++            )
++            params.append(f"%{kw}%")
++        return parts, params
++
++    def _build_where(self, keywords: list[str]) -> tuple[list[str], list]:
++        """构建 WHERE 子句中的命中条件（至少一个字段命中）。"""
++        conds: list[str] = []
++        params: list = []
++        for field, _ in self.FIELD_WEIGHTS:
++            for kw in keywords:
++                conds.append(f"{field} LIKE ?")
++                params.append(f"%{kw}%")
++        for kw in keywords:
++            conds.append(
++                f"id IN (SELECT memory_id FROM memory_tags WHERE tag LIKE ?)"
++            )
++            params.append(f"%{kw}%")
++        return conds, params
++
++    # ------------------------------------------------------------------
++    # 转换
++    # ------------------------------------------------------------------
++
++    def _rows_to_results(
++        self, rows: list[sqlite3.Row], project_id: str | None,
++    ) -> list[SearchResult]:
++        """sqlite3.Row → SearchResult 列表。"""
++        results: list[SearchResult] = []
++        for r in rows:
++            tag_rows = self.conn.execute(
++                "SELECT tag FROM memory_tags WHERE memory_id = ?", (r["id"],)
++            ).fetchall()
++            tag_list = [t["tag"] for t in tag_rows]
++
++            scope_val = r["scope"] or "project"
++            from_proj = r["project_id"]
++            if scope_val == "project" and project_id:
++                from_proj = project_id
++
++            # 解析 source_evidence JSON
++            evidence: dict = {}
++            se_val = r["source_evidence"] if "source_evidence" in r.keys() else None
++            if se_val and isinstance(se_val, str):
++                try:
++                    evidence = json.loads(se_val)
++                except (json.JSONDecodeError, TypeError):
++                    evidence = {}
++            if "file" not in evidence and r["source_file"]:
++                evidence["file"] = r["source_file"]
++            if "line" not in evidence and r["source_line"] is not None:
++                evidence["line"] = r["source_line"]
++
++            results.append(SearchResult(
++                id=r["id"],
++                title=r["title"] or "",
++                content=r["content"] or "",
++                type=r["type"] or "",
++                module=r["module"] or "",
++                scope=scope_val,
++                confidence=r["confidence"] if r["confidence"] is not None else 0.0,
++                risk_level=r["risk_level"] or "low",
++                tags=tag_list,
++                source_evidence=evidence,
++                match_type="keyword",
++                relevance_score=(
++                    float(r["relevance_score"])
++                    if "relevance_score" in r.keys() and r["relevance_score"] is not None
++                    else 0.0
++                ),
++                from_project=from_proj,
++            ))
++        return results
++
++    @staticmethod
++    def _tokenize(query: str) -> list[str]:
++        """分词：按空白拆分。"""
++        if not query or not query.strip():
++            return []
++        return [t for t in _TOKENIZE_RE.split(query.strip()) if t]
+diff --git a/src/project_memory_mcp/retrieval/ranker.py b/src/project_memory_mcp/retrieval/ranker.py
+index 91e0cbe..81dfbec 100644
+--- a/src/project_memory_mcp/retrieval/ranker.py
++++ b/src/project_memory_mcp/retrieval/ranker.py
+@@ -1,11 +1,85 @@
+-"""结果排序/融合 + context_pack 组装。"""
++"""ResultRanker — 去重、排序、context_pack 组装。"""
+ 
+-from ..models.context_pack import ContextPack
++from ..models.search_result import SearchResult
++from ..models.context_pack import ContextPack, ContextPackItem
+ 
+ 
+ class ResultRanker:
+     """搜索结果排序器 + context_pack 构建器。"""
+ 
+-    # TODO: 阶段 3 实现
+-    # merge(keyword_results, semantic_results) -> list[SearchResult]
+-    # build_context_pack(results, query, project_id) -> ContextPack
++    def merge(
++        self,
++        keyword_results: list[SearchResult],
++        semantic_results: list[SearchResult] | None = None,
++    ) -> list[SearchResult]:
++        """
++        合并 keyword + semantic 结果，去重保留最高分，按分数降序。
++
++        MVP 阶段 semantic_results 为 None 或空列表。
++        """
++        all_results = list(keyword_results)
++        if semantic_results:
++            all_results.extend(semantic_results)
++
++        seen: dict[str, SearchResult] = {}
++        for r in all_results:
++            if r.id not in seen or r.relevance_score > seen[r.id].relevance_score:
++                seen[r.id] = r
++
++        merged = list(seen.values())
++        merged.sort(key=lambda x: -x.relevance_score)
++        return merged
++
++    def build_context_pack(
++        self,
++        results: list[SearchResult],
++        query: str,
++        project_id: str,
++    ) -> ContextPack:
++        """
++        将合并后的结果按 scope 分组，构建 ContextPack。
++
++        分组：
++        - project_context: scope=project
++        - shared_context: scope=shared
++        - global_context: scope=global
++        """
++        project_items: list[ContextPackItem] = []
++        shared_items: list[ContextPackItem] = []
++        global_items: list[ContextPackItem] = []
++
++        for r in results:
++            item = ContextPackItem(
++                id=r.id,
++                title=r.title,
++                content=r.content,
++                type=r.type,
++                module=r.module,
++                scope=r.scope,
++                confidence=r.confidence,
++                risk_level=r.risk_level,
++                tags=r.tags,
++                source_evidence=r.source_evidence,
++                match_type=r.match_type,
++                relevance_score=r.relevance_score,
++                from_project=r.from_project or project_id,
++            )
++            if r.scope == "shared":
++                shared_items.append(item)
++            elif r.scope == "global":
++                global_items.append(item)
++            else:
++                project_items.append(item)
++
++        summary = (
++            f"找到 {len(project_items)} 条项目知识、"
++            f"{len(shared_items)} 条共享知识、"
++            f"{len(global_items)} 条全局知识。"
++        )
++
++        return ContextPack(
++            summary=summary,
++            project_context=project_items,
++            shared_context=shared_items,
++            global_context=global_items,
++        )
+diff --git a/src/project_memory_mcp/retrieval/search.py b/src/project_memory_mcp/retrieval/search.py
+index 7455b63..13e2248 100644
+--- a/src/project_memory_mcp/retrieval/search.py
++++ b/src/project_memory_mcp/retrieval/search.py
+@@ -1,26 +1,209 @@
+-"""统一搜索入口 — keyword + vector 降级，三级范围检索。"""
++"""KnowledgeSearchService — 统一搜索入口：keyword-first + 三级范围检索。"""
++
++import sqlite3
++
++from ..models.search_result import SearchResultSet
++from ..models.context_pack import ContextPack, ContextPackItem
++from .keyword_search import KeywordSearchService
++from .ranker import ResultRanker
+ 
+ 
+ class KnowledgeSearchService:
+     """
+-    搜索策略（keyword-first）：
+-    1. 先执行 SQLite keyword search（必须可用）
+-    2. 如果 vector store 可用，执行语义搜索
+-    3. 合并 keyword + semantic 结果
+-    4. 如果 vector store 不可用，返回纯 keyword 结果（不影响主流程）
+-
+-    三级范围检索：
+-    1. 当前 project scope=project 知识
+-    2. scope=shared 且 allowed_projects 包含当前项目
+-    3. scope=global 知识
++    统一搜索入口。
++
++    策略：
++    1. keyword search（SQLite LIKE，必须可用）
++    2. vector search（best-effort，不可用时不影响主流程）
++    3. 合并去重排序 → context_pack
++
++    三级范围：
++    1. project scope 知识（scope=project）
++    2. shared scope 知识（scope=shared + allowed）
++    3. global scope 知识（scope=global）
+     """
+ 
+-    def __init__(self, memory_repo, vector_store, embedder):
+-        self.memory_repo = memory_repo
++    def __init__(
++        self,
++        conn: sqlite3.Connection,
++        vector_store=None,
++        embedder=None,
++    ):
++        self.keyword_search = KeywordSearchService(conn)
++        self.ranker = ResultRanker()
+         self.vector_store = vector_store
+         self.embedder = embedder
+-        self.keyword_search = None  # TODO: 阶段 3 初始化
+-        self.ranker = None  # TODO: 阶段 3 初始化
+ 
+-    # TODO: 阶段 3 实现
+-    # async search(project_id, query, **filters) -> ContextPack
++    def search(
++        self,
++        project_id: str,
++        query: str,
++        modules: list[str] | None = None,
++        types: list[str] | None = None,
++        tags: list[str] | None = None,
++        max_results: int = 10,
++        min_confidence: float | None = None,
++        include_shared: bool = True,
++        include_global: bool = True,
++        include_candidates: bool = False,
++    ) -> SearchResultSet:
++        """
++        执行检索，返回 SearchResultSet（含 context_pack）。
++
++        参数：
++        - project_id: 当前项目
++        - query: 搜索关键词
++        - modules/types/tags: 可选过滤
++        - max_results: 最大返回数
++        - min_confidence: 最低置信度
++        - include_shared/include_global: 是否包含共享/全局知识
++        - include_candidates: 是否包含候选/待审核知识
++        """
++        # 1. keyword search（主搜索，内部不再截断）
++        if query and query.strip():
++            keyword_results = self.keyword_search.search(
++                project_id=project_id,
++                query=query,
++                modules=modules,
++                types=types,
++                tags=tags,
++                max_results=max_results * 3,  # 给三级范围留余量
++                min_confidence=min_confidence,
++                include_shared=include_shared,
++                include_global=include_global,
++                include_candidates=include_candidates,
++            )
++        else:
++            keyword_results = self.keyword_search.search_empty(
++                project_id=project_id,
++                max_results=max_results * 3,
++                modules=modules,
++                types=types,
++                tags=tags,
++                min_confidence=min_confidence,
++                include_shared=include_shared,
++                include_global=include_global,
++                include_candidates=include_candidates,
++            )
++
++        # 2. semantic search（best-effort）
++        semantic_results = []
++        fallback = False
++        if self.vector_store is not None and self.embedder is not None:
++            try:
++                if await_check(self.vector_store) and query and query.strip():
++                    # TODO: Phase 7 Qdrant 集成
++                    pass
++            except Exception:
++                fallback = True
++
++        # 3. 合并去重排序
++        merged = self.ranker.merge(keyword_results, semantic_results)
++        total_found = len(merged)
++
++        # 4. 全局截断后构建 context_pack
++        limited = merged[:max_results]
++
++        # Re-count actual scope counts for summary
++        p_count = sum(1 for r in limited if r.scope == "project")
++        s_count = sum(1 for r in limited if r.scope == "shared")
++        g_count = sum(1 for r in limited if r.scope == "global")
++        context_pack = ContextPack(
++            summary=f"找到 {p_count} 条项目知识、{s_count} 条共享知识、{g_count} 条全局知识。",
++            project_context=[
++                ContextPackItem(
++                    id=r.id, title=r.title, content=r.content,
++                    type=r.type, module=r.module, scope=r.scope,
++                    confidence=r.confidence, risk_level=r.risk_level,
++                    tags=r.tags, source_evidence=r.source_evidence,
++                    match_type=r.match_type, relevance_score=r.relevance_score,
++                    from_project=r.from_project or project_id,
++                )
++                for r in limited if r.scope == "project"
++            ],
++            shared_context=[
++                ContextPackItem(
++                    id=r.id, title=r.title, content=r.content,
++                    type=r.type, module=r.module, scope=r.scope,
++                    confidence=r.confidence, risk_level=r.risk_level,
++                    tags=r.tags, source_evidence=r.source_evidence,
++                    match_type=r.match_type, relevance_score=r.relevance_score,
++                    from_project=r.from_project or project_id,
++                )
++                for r in limited if r.scope == "shared"
++            ],
++            global_context=[
++                ContextPackItem(
++                    id=r.id, title=r.title, content=r.content,
++                    type=r.type, module=r.module, scope=r.scope,
++                    confidence=r.confidence, risk_level=r.risk_level,
++                    tags=r.tags, source_evidence=r.source_evidence,
++                    match_type=r.match_type, relevance_score=r.relevance_score,
++                    from_project=r.from_project or project_id,
++                )
++                for r in limited if r.scope == "global"
++            ],
++        )
++
++        return SearchResultSet(
++            query=query,
++            project_id=project_id,
++            project_resolved=True,
++            context_pack={
++                "summary": context_pack.summary,
++                "project_context": [
++                    {
++                        "id": i.id, "title": i.title, "content": i.content,
++                        "type": i.type, "module": i.module, "scope": i.scope,
++                        "confidence": i.confidence, "risk_level": i.risk_level,
++                        "tags": i.tags, "source_evidence": i.source_evidence,
++                        "match_type": i.match_type, "relevance_score": i.relevance_score,
++                        "from_project": i.from_project,
++                    }
++                    for i in context_pack.project_context
++                ],
++                "shared_context": [
++                    {
++                        "id": i.id, "title": i.title, "content": i.content,
++                        "type": i.type, "module": i.module, "scope": i.scope,
++                        "confidence": i.confidence, "risk_level": i.risk_level,
++                        "tags": i.tags, "source_evidence": i.source_evidence,
++                        "match_type": i.match_type, "relevance_score": i.relevance_score,
++                        "from_project": i.from_project,
++                    }
++                    for i in context_pack.shared_context
++                ],
++                "global_context": [
++                    {
++                        "id": i.id, "title": i.title, "content": i.content,
++                        "type": i.type, "module": i.module, "scope": i.scope,
++                        "confidence": i.confidence, "risk_level": i.risk_level,
++                        "tags": i.tags, "source_evidence": i.source_evidence,
++                        "match_type": i.match_type, "relevance_score": i.relevance_score,
++                        "from_project": i.from_project,
++                    }
++                    for i in context_pack.global_context
++                ],
++            },
++            total_found=total_found,
++            total_returned=len(limited),
++            search_method="keyword",
++            fallback_activated=fallback,
++        )
++
++
++def await_check(store) -> bool:
++    """同步检查 vector store 可用性（避免引入 asyncio 依赖）。"""
++    import asyncio
++    try:
++        loop = asyncio.get_event_loop()
++        if loop.is_running():
++            return True  # 不能嵌套 await，假定可用
++        return loop.run_until_complete(store.is_available())
++    except RuntimeError:
++        try:
++            return asyncio.run(store.is_available())
++        except Exception:
++            return False
++    except Exception:
++        return False
+diff --git a/tests/test_search.py b/tests/test_search.py
+index 750186b..950948b 100644
+--- a/tests/test_search.py
++++ b/tests/test_search.py
+@@ -1,8 +1,488 @@
+-"""检索隔离测试。"""
+-
+-# TODO: 阶段 3 实现
+-# 测试场景：
+-# 1. 当前项目只查到自己的知识
+-# 2. 当前项目可以查到 shared/global 知识
+-# 3. 当前项目查不到其他项目 private 知识
+-# 4. vector store 降级时 keyword search 正常工作
++"""检索模块测试 — 关键词搜索、隔离、过滤、context_pack。"""
++
++import os
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from project_memory_mcp.db.connection import DatabaseConnection
++from project_memory_mcp.db.memory_repo import MemoryRepository
++from project_memory_mcp.db.project_repo import ProjectRepository
++from project_memory_mcp.models.project import Project
++from project_memory_mcp.models.memory_item import MemoryItem
++from project_memory_mcp.utils.hashing import compute_content_hash
++from project_memory_mcp.retrieval.search import KnowledgeSearchService
++from project_memory_mcp.retrieval.keyword_search import KeywordSearchService
++from project_memory_mcp.retrieval.filter_builder import FilterBuilder
++
++
++# ------------------------------------------------------------------
++# Fixtures
++# ------------------------------------------------------------------
++
++@pytest.fixture
++def db_path():
++    fd, path = tempfile.mkstemp(suffix=".db")
++    os.close(fd)
++    Path(path).unlink(missing_ok=True)
++    yield path
++    Path(path).unlink(missing_ok=True)
++
++
++@pytest.fixture
++def conn(db_path):
++    db = DatabaseConnection(db_path)
++    c = db.connect()
++    yield c
++    db.close()
++
++
++@pytest.fixture
++def project_repo(conn):
++    return ProjectRepository(conn)
++
++
++@pytest.fixture
++def memory_repo(conn):
++    return MemoryRepository(conn)
++
++
++@pytest.fixture
++def search_svc(conn):
++    return KnowledgeSearchService(conn)
++
++
++@pytest.fixture
++def kw_svc(conn):
++    return KeywordSearchService(conn)
++
++
++# ------------------------------------------------------------------
++# 种子数据
++# ------------------------------------------------------------------
++
++def _seed(project_repo, memory_repo):
++    """创建多项目种子数据。"""
++    # 项目 A
++    pa = Project(id="proj-a", name="项目A", slug="proj-a", status="active",
++                 root_paths=["/a"], tech_stack=["py"])
++    project_repo.upsert_project(pa, actor="seed")
++
++    # 项目 B
++    pb = Project(id="proj-b", name="项目B", slug="proj-b", status="active",
++                 root_paths=["/b"], tech_stack=["java"])
++    project_repo.upsert_project(pb, actor="seed")
++
++    # shared 虚拟项目（scope=shared/global 知识的宿主）
++    ps = Project(id="shared", name="共享知识", slug="shared", status="active",
++                 root_paths=[], tech_stack=[])
++    project_repo.upsert_project(ps, actor="seed")
++
++    def _mem(pid, title, content, mem_type="api", module="模块A", status="approved",
++             scope="project", risk="low", confidence=0.9, tags=None,
++             allowed_projects=None, denied_projects=None):
++        item = MemoryItem(
++            project_id=pid, module=module, type=mem_type, title=title, content=content,
++            content_hash=compute_content_hash(content), status=status,
++            index_status="not_indexed", confidence=confidence, risk_level=risk,
++            scope=scope, source_type="manual_input", tags=tags or [],
++            allowed_projects=allowed_projects or [], denied_projects=denied_projects or [],
++        )
++        return memory_repo.create_memory(item, actor="seed")
++
++    # A 的 approved 知识
++    _mem("proj-a", "A项目订单查询API", "订单查询接口返回分页数据", tags=["order", "query"])
++    _mem("proj-a", "A项目物料管理", "物料管理模块设计文档", mem_type="architecture", tags=["material"])
++    _mem("proj-a", "A项目配置说明", "数据库连接池配置", mem_type="configuration", module="基础设施")
++
++    # A 的 candidate 知识
++    _mem("proj-a", "A项目候选知识", "候选待审核内容", status="candidate")
++    _mem("proj-a", "A项目待审核", "待审核知识", status="pending_review")
++
++    # A 的 rejected/deprecated
++    _mem("proj-a", "A项目已拒绝", "拒绝的知识", status="rejected")
++    _mem("proj-a", "A项目已废弃", "废弃的知识", status="deprecated")
++
++    # B 的 approved 知识
++    _mem("proj-b", "B项目用户管理API", "用户管理接口文档", tags=["user", "api"])
++
++    # shared 知识 — allowed proj-a
++    _mem("shared", "共享Windows调试经验", "PowerShell常用命令", scope="shared",
++         allowed_projects=["proj-a"], denied_projects=[])
++
++    # shared 知识 — denied proj-a
++    _mem("shared", "仅B可用的共享", "仅项目B可用的知识", scope="shared",
++         allowed_projects=[], denied_projects=["proj-a"])
++
++    # global 知识
++    _mem("shared", "全局Python经验", "Python虚拟环境管理", scope="global",
++         allowed_projects=[], denied_projects=[])
++
++
++# ------------------------------------------------------------------
++# 测试
++# ------------------------------------------------------------------
++
++class TestSearchIsolation:
++    """检索隔离测试。"""
++
++    def test_01_project_only_own_scope(self, project_repo, memory_repo, search_svc):
++        """当前项目只搜到自己的 scope=project 知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "订单")
++        project_items = result.context_pack["project_context"]
++        titles = {i["title"] for i in project_items}
++        assert "A项目订单查询API" in titles
++        # 不应包含 B 的知识
++        assert "B项目用户管理API" not in titles
++
++    def test_02_not_other_project(self, project_repo, memory_repo, search_svc):
++        """当前项目搜不到其他项目的 scope=project 知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "用户管理")
++        project_items = result.context_pack["project_context"]
++        assert len(project_items) == 0
++
++    def test_03_shared_allowed_visible(self, project_repo, memory_repo, search_svc):
++        """当前项目能搜到 scope=shared 且 allowed 的知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "调试 PowerShell")
++        shared = result.context_pack["shared_context"]
++        titles = {i["title"] for i in shared}
++        assert "共享Windows调试经验" in titles
++
++    def test_04_shared_denied_hidden(self, project_repo, memory_repo, search_svc):
++        """当前项目搜不到 scope=shared 且 denied 的知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "仅B")
++        shared = result.context_pack["shared_context"]
++        titles = {i["title"] for i in shared}
++        assert "仅B可用的共享" not in titles
++
++    def test_05_global_visible(self, project_repo, memory_repo, search_svc):
++        """当前项目能搜到 scope=global 知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "虚拟环境 Python")
++        global_items = result.context_pack["global_context"]
++        titles = {i["title"] for i in global_items}
++        assert "全局Python经验" in titles
++
++
++class TestSearchFiltering:
++    """过滤测试。"""
++
++    def test_06_default_approved_only(self, project_repo, memory_repo, search_svc):
++        """默认只返回 approved。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目")
++        all_titles = (
++            {i["title"] for i in result.context_pack["project_context"]}
++            | {i["title"] for i in result.context_pack["shared_context"]}
++            | {i["title"] for i in result.context_pack["global_context"]}
++        )
++        assert "A项目已拒绝" not in all_titles
++        assert "A项目已废弃" not in all_titles
++
++    def test_07_include_candidates(self, project_repo, memory_repo, search_svc):
++        """include_candidates=true 时可返回 candidate/pending_review。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", include_candidates=True)
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目候选知识" in titles
++        assert "A项目待审核" in titles
++
++    def test_08_exclude_rejected_deprecated(self, project_repo, memory_repo, search_svc):
++        """默认不返回 rejected/deprecated/superseded/conflict。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目")
++        all_ids = []
++        for items in result.context_pack.values():
++            if isinstance(items, list):
++                all_ids.extend(i["id"] for i in items)
++        # 检查没有 status=rejected/deprecated 的
++        for mid in all_ids:
++            mem = memory_repo.get_by_id(mid)
++            assert mem.status not in ("rejected", "deprecated", "superseded", "conflict")
++
++    def test_09_tag_search(self, project_repo, memory_repo, search_svc):
++        """tag 命中可以被搜到。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "query")
++        project_titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目订单查询API" in project_titles
++
++    def test_10_module_filter(self, project_repo, memory_repo, search_svc):
++        """module 过滤生效。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", modules=["基础设施"])
++        project_titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目配置说明" in project_titles
++        assert "A项目物料管理" not in project_titles
++
++    def test_11_type_filter(self, project_repo, memory_repo, search_svc):
++        """type 过滤生效。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", types=["architecture"])
++        project_titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目物料管理" in project_titles
++        assert "A项目订单查询API" not in project_titles
++
++    def test_12_min_confidence(self, project_repo, memory_repo, search_svc):
++        """min_confidence 过滤生效。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", min_confidence=0.95)
++        project_titles = {i["title"] for i in result.context_pack["project_context"]}
++        # 所有知识的 confidence=0.9，0.95 过滤掉全部
++        assert len(project_titles) == 0
++
++    def test_13_max_results(self, project_repo, memory_repo, search_svc):
++        """max_results 生效。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", max_results=2)
++        total = sum(
++            len(result.context_pack[k])
++            for k in ("project_context", "shared_context", "global_context")
++            if isinstance(result.context_pack[k], list)
++        )
++        assert total <= 2
++
++    def test_14_sql_injection_safe(self, project_repo, memory_repo, kw_svc):
++        """查询参数使用参数化 SQL，包含引号的 query 不报错。"""
++        _seed(project_repo, memory_repo)
++        # 包含单引号和双引号的查询不应导致 SQL 错误
++        results = kw_svc.search("proj-a", "test' OR 1=1 --")
++        assert isinstance(results, list)
++        results2 = kw_svc.search("proj-a", 'test" OR "1"="1')
++        assert isinstance(results2, list)
++
++
++class TestContextPack:
++    """context_pack 格式测试。"""
++
++    def test_15_context_pack_grouping(self, project_repo, memory_repo, search_svc):
++        """context_pack 按 project/shared/global 分组。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "管理 用户")
++        cp = result.context_pack
++        assert "project_context" in cp
++        assert "shared_context" in cp
++        assert "global_context" in cp
++        assert "summary" in cp
++        assert isinstance(cp["project_context"], list)
++        assert isinstance(cp["shared_context"], list)
++        assert isinstance(cp["global_context"], list)
++
++    def test_16_summary_correct(self, project_repo, memory_repo, search_svc):
++        """context_pack summary 正确。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "管理")
++        summary = result.context_pack["summary"]
++        assert "项目知识" in summary
++        assert "共享知识" in summary
++        assert "全局知识" in summary
++
++    def test_17_dedup(self, project_repo, memory_repo, search_svc):
++        """重复结果会去重。"""
++        _seed(project_repo, memory_repo)
++        # 搜索两次同一个关键词，结果应无重复 id
++        result = search_svc.search("proj-a", "A项目")
++        all_ids = []
++        for items in result.context_pack.values():
++            if isinstance(items, list):
++                all_ids.extend(i["id"] for i in items)
++        assert len(all_ids) == len(set(all_ids))
++
++    def test_18_empty_query(self, project_repo, memory_repo, search_svc):
++        """空 query 返回最近知识，但仍遵守隔离规则。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "")
++        project_items = result.context_pack["project_context"]
++        # 不应包含 B 的知识
++        for item in project_items:
++            assert item.get("from_project", "proj-a") != "proj-b"
++
++
++class TestFilterBuilder:
++    """FilterBuilder 单元测试。"""
++
++    def test_19_project_filter_sql(self):
++        """project filter 生成参数化 SQL。"""
++        clause = FilterBuilder.build_project_filter("my-project")
++        assert "scope = 'project'" in clause.sql
++        assert "project_id = ?" in clause.sql
++        assert "my-project" in clause.params
++
++    def test_20_shared_filter_allowed(self):
++        """shared filter 检查 allowed_projects。"""
++        clause = FilterBuilder.build_shared_filter("my-project")
++        assert "scope = 'shared'" in clause.sql
++        assert "allowed_projects" in clause.sql
++        assert "denied_projects" in clause.sql
++
++# ------------------------------------------------------------------
++# Phase 3.1 新增：max_results 全局限制
++# ------------------------------------------------------------------
++
++class TestGlobalMaxResults:
++    """全局 max_results 测试。"""
++
++    def test_21_total_not_exceed_max_results(self, project_repo, memory_repo, search_svc):
++        """project+shared+global 都命中时 max_results=2 总条数 <= 2。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", max_results=2)
++        total = sum(
++            len(result.context_pack[k])
++            for k in ("project_context", "shared_context", "global_context")
++            if isinstance(result.context_pack[k], list)
++        )
++        assert total <= 2
++
++    def test_22_total_found_gte_total_returned(self, project_repo, memory_repo, search_svc):
++        """total_found >= total_returned。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", max_results=1)
++        assert result.total_found >= result.total_returned
++
++    def test_23_total_returned_matches_context_pack(self, project_repo, memory_repo, search_svc):
++        """total_returned == context_pack 三个分组数量之和。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "A项目", max_results=3)
++        cp_total = sum(
++            len(result.context_pack[k])
++            for k in ("project_context", "shared_context", "global_context")
++            if isinstance(result.context_pack[k], list)
++        )
++        assert result.total_returned == cp_total
++
++
++class TestSourceEvidence:
++    """source_evidence 测试。"""
++
++    def test_24_source_evidence_in_search(self, project_repo, memory_repo, search_svc):
++        """创建时写入 source_evidence，搜索后能读到。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'evi test'
++        item = MemoryItem(
++            project_id='proj-a', title='证据测试', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input',
++            source_evidence={'file': 'A.java', 'line': 3, 'reasoning': 'test'}
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "证据")
++        items = result.context_pack["project_context"]
++        assert len(items) >= 1
++        assert items[0]["source_evidence"]["file"] == "A.java"
++        assert items[0]["source_evidence"]["line"] == 3
++
++    def test_25_source_file_line_to_evidence(self, project_repo, memory_repo, search_svc):
++        """只有 source_file/source_line 字段时也能补进 source_evidence。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'file line test'
++        item = MemoryItem(
++            project_id='proj-a', title='文件行测试', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input',
++            source_file='B.java', source_line=42
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "文件行")
++        items = result.context_pack["project_context"]
++        assert len(items) >= 1
++        assert items[0]["source_evidence"].get("file") == "B.java"
++        assert items[0]["source_evidence"].get("line") == 42
++
++
++class TestEmptyQueryFilters:
++    """空 query 过滤测试。"""
++
++    def test_26_empty_query_module_filter(self, project_repo, memory_repo, search_svc):
++        """search(project_id, \"\", modules=[...]) 只返回该 module。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "", modules=["基础设施"])
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目配置说明" in titles
++        assert "A项目物料管理" not in titles
++
++    def test_27_empty_query_type_filter(self, project_repo, memory_repo, search_svc):
++        """search(project_id, \"\", types=[...]) 只返回该 type。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "", types=["architecture"])
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目物料管理" in titles
++        assert "A项目订单查询API" not in titles
++
++    def test_28_empty_query_tag_filter(self, project_repo, memory_repo, search_svc):
++        """search(project_id, \"\", tags=[...]) 只返回有该 tag 的知识。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "", tags=["order"])
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "A项目订单查询API" in titles
++
++    def test_29_empty_query_min_confidence(self, project_repo, memory_repo, search_svc):
++        """search(project_id, \"\", min_confidence=0.95) 过滤低置信度。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "", min_confidence=0.95)
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert len(titles) == 0  # 所有知识 confidence=0.9
++
++
++class TestInstrMembership:
++    """instr JSON membership 测试。"""
++
++    def test_30_instr_underscore_not_wildcard(self, project_repo, memory_repo, search_svc):
++        """project_id 含 _ 时 instr 精确匹配，不被 LIKE 通配符误判。"""
++        for pid in ['proj_a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'underscore membership test'
++        item = MemoryItem(
++            project_id='shared', title='下划线测试', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='shared', source_type='manual_input',
++            allowed_projects=['projXa'], denied_projects=[]
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj_a", "下划线")
++        shared_titles = {i["title"] for i in result.context_pack["shared_context"]}
++        assert "下划线测试" not in shared_titles
++
++    def test_31_instr_exact_match(self, project_repo, memory_repo, search_svc):
++        """shared allowed 精确匹配 project_id。"""
++        for pid in ['proj_a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'exact match test'
++        item = MemoryItem(
++            project_id='shared', title='精确匹配测试', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='shared', source_type='manual_input',
++            allowed_projects=['proj_a'], denied_projects=[]
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj_a", "精确匹配")
++        shared_titles = {i["title"] for i in result.context_pack["shared_context"]}
++        assert "精确匹配测试" in shared_titles
++
++
++class TestScopeNotPreempted:
++    """shared/global 不被 project 提前挤掉。"""
++
++    def test_32_shared_still_visible(self, project_repo, memory_repo, search_svc):
++        """project 命中很多但 shared 仍有机会进入 merged。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "Windows PowerShell 调试")
++        shared_titles = {i["title"] for i in result.context_pack["shared_context"]}
++        assert "共享Windows调试经验" in shared_titles
++
++    def test_33_global_still_visible_under_limit(self, project_repo, memory_repo, search_svc):
++        """max_results 较小但不影响 global 可见性。"""
++        _seed(project_repo, memory_repo)
++        result = search_svc.search("proj-a", "Python 虚拟环境")
++        global_titles = {i["title"] for i in result.context_pack["global_context"]}
++        assert "全局Python经验" in global_titles

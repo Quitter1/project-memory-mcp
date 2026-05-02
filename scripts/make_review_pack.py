@@ -41,16 +41,18 @@ def run_cmd(cmd_str: str) -> tuple[int, str, str]:
     """运行命令，返回 (returncode, stdout, stderr)。"""
     # Windows 下用 shell=True 保证 pytest 等工具可用
     env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     result = subprocess.run(
         cmd_str,
         cwd=PROJECT_ROOT,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         shell=True,
         env=env,
     )
-    return result.returncode, result.stdout, result.stderr
+    return result.returncode, result.stdout or "", result.stderr or ""
 
 
 def generate_tree(phase: int) -> Path:

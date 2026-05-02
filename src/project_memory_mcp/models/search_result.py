@@ -29,6 +29,7 @@ class SearchResultSet:
     project_id: str = ""
     project_resolved: bool = False
     context_pack: dict = field(default_factory=dict)
-    total_found: int = 0
+    total_found: int = 0        # 检索命中总数（截断前）
+    total_returned: int = 0     # 实际返回总数（截断后）
     search_method: str = "keyword"
     fallback_activated: bool = False

@@ -2,6 +2,12 @@
 
 from .search import KnowledgeSearchService
 from .keyword_search import KeywordSearchService
+from .filter_builder import FilterBuilder
 from .ranker import ResultRanker
 
-__all__ = ["KnowledgeSearchService", "KeywordSearchService", "ResultRanker"]
+__all__ = [
+    "KnowledgeSearchService",
+    "KeywordSearchService",
+    "FilterBuilder",
+    "ResultRanker",
+]
