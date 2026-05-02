@@ -3,7 +3,6 @@
 import sqlite3
 
 from ..models.search_result import SearchResultSet
-from ..models.context_pack import ContextPack, ContextPackItem
 from .keyword_search import KeywordSearchService
 from .ranker import ResultRanker
 
@@ -101,56 +100,16 @@ class KnowledgeSearchService:
         merged = self.ranker.merge(keyword_results, semantic_results)
         total_found = len(merged)
 
-        # 4. 全局截断后构建 context_pack
+        # 4. 全局截断后构建 context_pack（复用 ResultRanker）
         limited = merged[:max_results]
-
-        # Re-count actual scope counts for summary
-        p_count = sum(1 for r in limited if r.scope == "project")
-        s_count = sum(1 for r in limited if r.scope == "shared")
-        g_count = sum(1 for r in limited if r.scope == "global")
-        context_pack = ContextPack(
-            summary=f"找到 {p_count} 条项目知识、{s_count} 条共享知识、{g_count} 条全局知识。",
-            project_context=[
-                ContextPackItem(
-                    id=r.id, title=r.title, content=r.content,
-                    type=r.type, module=r.module, scope=r.scope,
-                    confidence=r.confidence, risk_level=r.risk_level,
-                    tags=r.tags, source_evidence=r.source_evidence,
-                    match_type=r.match_type, relevance_score=r.relevance_score,
-                    from_project=r.from_project or project_id,
-                )
-                for r in limited if r.scope == "project"
-            ],
-            shared_context=[
-                ContextPackItem(
-                    id=r.id, title=r.title, content=r.content,
-                    type=r.type, module=r.module, scope=r.scope,
-                    confidence=r.confidence, risk_level=r.risk_level,
-                    tags=r.tags, source_evidence=r.source_evidence,
-                    match_type=r.match_type, relevance_score=r.relevance_score,
-                    from_project=r.from_project or project_id,
-                )
-                for r in limited if r.scope == "shared"
-            ],
-            global_context=[
-                ContextPackItem(
-                    id=r.id, title=r.title, content=r.content,
-                    type=r.type, module=r.module, scope=r.scope,
-                    confidence=r.confidence, risk_level=r.risk_level,
-                    tags=r.tags, source_evidence=r.source_evidence,
-                    match_type=r.match_type, relevance_score=r.relevance_score,
-                    from_project=r.from_project or project_id,
-                )
-                for r in limited if r.scope == "global"
-            ],
-        )
+        cp = self.ranker.build_context_pack(limited, query, project_id)
 
         return SearchResultSet(
             query=query,
             project_id=project_id,
             project_resolved=True,
             context_pack={
-                "summary": context_pack.summary,
+                "summary": cp.summary,
                 "project_context": [
                     {
                         "id": i.id, "title": i.title, "content": i.content,
@@ -160,7 +119,7 @@ class KnowledgeSearchService:
                         "match_type": i.match_type, "relevance_score": i.relevance_score,
                         "from_project": i.from_project,
                     }
-                    for i in context_pack.project_context
+                    for i in cp.project_context
                 ],
                 "shared_context": [
                     {
@@ -171,7 +130,7 @@ class KnowledgeSearchService:
                         "match_type": i.match_type, "relevance_score": i.relevance_score,
                         "from_project": i.from_project,
                     }
-                    for i in context_pack.shared_context
+                    for i in cp.shared_context
                 ],
                 "global_context": [
                     {
@@ -182,7 +141,7 @@ class KnowledgeSearchService:
                         "match_type": i.match_type, "relevance_score": i.relevance_score,
                         "from_project": i.from_project,
                     }
-                    for i in context_pack.global_context
+                    for i in cp.global_context
                 ],
             },
             total_found=total_found,

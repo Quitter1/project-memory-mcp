@@ -486,3 +486,141 @@ class TestScopeNotPreempted:
         result = search_svc.search("proj-a", "Python 虚拟环境")
         global_titles = {i["title"] for i in result.context_pack["global_context"]}
         assert "全局Python经验" in global_titles
+
+# ------------------------------------------------------------------
+# Phase 3.2 新增：Tag SQL 过滤不丢数据
+# ------------------------------------------------------------------
+
+class TestTagSqlFiltering:
+    """验证 tag 过滤在 SQL 层完成，不会因 LIMIT 丢失数据。"""
+
+    def test_34_rare_tag_found_with_empty_query(self, project_repo, memory_repo, search_svc):
+        """30 条无 tag 知识 + 1 条旧 rare tag 知识，空 query 能搜到 rare。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        # 30 条无 tag 新知识
+        for i in range(30):
+            content = f"common knowledge {i}"
+            item = MemoryItem(
+                project_id='proj-a', title=f'公共知识{i}', content=content,
+                content_hash=compute_content_hash(content), status='approved',
+                scope='project', source_type='manual_input'
+            )
+            memory_repo.create_memory(item, actor='seed')
+        # 1 条带 rare tag 的旧知识
+        content = 'rare content'
+        item = MemoryItem(
+            project_id='proj-a', title='稀有知识', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input', tags=['rare']
+        )
+        memory_repo.create_memory(item, actor='seed')
+
+        result = search_svc.search("proj-a", "", tags=["rare"], max_results=10)
+        titles = {i["title"] for i in result.context_pack["project_context"]}
+        assert "稀有知识" in titles, f"rare tag not found, got: {titles}"
+
+    def test_35_rare_tag_found_with_query(self, project_repo, memory_repo, search_svc):
+        """非空 query 也能搜到 rare tag。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        for i in range(30):
+            content = f"common knowledge {i}"
+            item = MemoryItem(
+                project_id='proj-a', title=f'公共稀缺知识{i}', content=content,
+                content_hash=compute_content_hash(content), status='approved',
+                scope='project', source_type='manual_input'
+            )
+            memory_repo.create_memory(item, actor='seed')
+        content = 'rare content with keyword'
+        item = MemoryItem(
+            project_id='proj-a', title='稀有稀有知识', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input', tags=['rare']
+        )
+        memory_repo.create_memory(item, actor='seed')
+
+        result = search_svc.search("proj-a", "稀有", tags=["rare"], max_results=10)
+        titles = {i["title"] for i in result.context_pack["project_context"]}
+        assert "稀有稀有知识" in titles
+
+
+# ------------------------------------------------------------------
+# Phase 3.2 新增：LIKE 转义测试
+# ------------------------------------------------------------------
+
+class TestLikeEscape:
+    """LIKE 通配符转义测试。"""
+
+    def test_36_percent_query_not_match_normal(self, project_repo, memory_repo, search_svc):
+        """query 为 % 时不应匹配没有 % 的普通内容。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        content = 'normal content without percent sign'
+        item = MemoryItem(
+            project_id='proj-a', title='普通知识', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input'
+        )
+        memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "%")
+        titles = {i["title"] for i in result.context_pack["project_context"]}
+        assert "普通知识" not in titles, "% should be escaped, not wildcard"
+
+    def test_37_underscore_query_not_match_normal(self, project_repo, memory_repo, search_svc):
+        """query 为 _ 时不应匹配没有 _ 的普通内容。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        content = 'abc def ghi jkl'
+        item = MemoryItem(
+            project_id='proj-a', title='无下划线', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input'
+        )
+        memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "_")
+        titles = {i["title"] for i in result.context_pack["project_context"]}
+        assert "无下划线" not in titles, "_ should be escaped, not single-char wildcard"
+
+    def test_38_percent_in_content_searchable(self, project_repo, memory_repo, search_svc):
+        """内容中真的包含 % 时 query % 可以搜到。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        content = 'discount 50% off'
+        item = MemoryItem(
+            project_id='proj-a', title='打折信息', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input'
+        )
+        memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "%")
+        titles = {i["title"] for i in result.context_pack["project_context"]}
+        # query "%" 转义后匹配文本中的 "%"
+        assert "打折信息" in titles
+
+    def test_39_underscore_in_tag_searchable(self, project_repo, memory_repo, search_svc):
+        """tag 中真的包含 _ 时 query _ 可以搜到。"""
+        for pid in ['proj-a', 'shared']:
+            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
+            project_repo.upsert_project(pa, actor='seed')
+        content = 'tag with underscore'
+        item = MemoryItem(
+            project_id='proj-a', title='下划线标签', content=content,
+            content_hash=compute_content_hash(content), status='approved',
+            scope='project', source_type='manual_input', tags=['tag_with_underscore']
+        )
+        memory_repo.create_memory(item, actor='seed')
+        result = search_svc.search("proj-a", "_")
+        # query "_" 应能通过 tag LIKE 匹配到 "tag_with_underscore"
+        # 因为 tag 里确实含有 _
+        any_match = False
+        for items in [result.context_pack["project_context"]]:
+            for i in items:
+                if "下划线标签" == i["title"]:
+                    any_match = True
+        assert any_match, "tag with _ should match query _"

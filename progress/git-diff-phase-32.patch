@@ -1,0 +1,581 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 5675889..87d645b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -235,4 +235,32 @@ review-pack-phase-2.zip
+ 
+ python scripts/make_review_pack.py --phase 2 --test "pytest tests/test_config_loader.py tests/test_resolver.py -v"
+ 
+-完成后输出 zip 路径和包含文件数量。
+\ No newline at end of file
++完成后输出 zip 路径和包含文件数量。
++
++## 审阅规则
++
++每个阶段完成后，必须输出以下 5 项供外部审阅：
++
++1. **review-pack zip** — 完整源码审阅包
++2. **phase summary** — progress/phase-{n}-summary.md
++3. **test-output** — progress/test-output-phase-{n}.txt
++4. **git-status** — progress/git-status-phase-{n}.txt
++5. **git-diff** — progress/git-diff-phase-{n}.patch
++
++## 提交提醒
++
++每个阶段通过审阅后，提醒用户做一次 Git commit：
++
++```bash
++git add .
++git commit -m "phase 0-{n} {阶段名}"
++```
++
++例如：
++
++```bash
++git add .
++git commit -m "phase 0-3.2 search foundation"
++```
++
++这样后续阶段的 `git diff` 才真正有价值。
+\ No newline at end of file
+diff --git a/src/project_memory_mcp/retrieval/filter_builder.py b/src/project_memory_mcp/retrieval/filter_builder.py
+index 7121581..c45376e 100644
+--- a/src/project_memory_mcp/retrieval/filter_builder.py
++++ b/src/project_memory_mcp/retrieval/filter_builder.py
+@@ -35,6 +35,7 @@ class FilterBuilder:
+         include_candidates: bool = False,
+         modules: list[str] | None = None,
+         types: list[str] | None = None,
++        tags: list[str] | None = None,
+         min_confidence: float | None = None,
+     ) -> FilterClause:
+         """
+@@ -51,10 +52,16 @@ class FilterBuilder:
+         params.extend(status_params)
+ 
+         # 可选过滤
+-        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        extra_sql, extra_params = cls._optional_filters(modules, types, min_confidence)
+         conditions.append(extra_sql)
+         params.extend(extra_params)
+ 
++        # Tag SQL 过滤
++        if tags:
++            tag_sql, tag_params = cls._build_tag_sql(tags)
++            conditions.append(tag_sql)
++            params.extend(tag_params)
++
+         where = " AND ".join(conditions)
+         return FilterClause(where, params)
+ 
+@@ -64,6 +71,7 @@ class FilterBuilder:
+         project_id: str,
+         modules: list[str] | None = None,
+         types: list[str] | None = None,
++        tags: list[str] | None = None,
+         min_confidence: float | None = None,
+     ) -> FilterClause:
+         """
+@@ -75,18 +83,21 @@ class FilterBuilder:
+         conditions = [
+             "scope = 'shared'",
+             "status = 'approved'",
+-            # allowed: 空 JSON 数组 或 包含 project_id（instr 精确匹配，避免 LIKE 通配符）
+             "(allowed_projects = '[]' OR instr(allowed_projects, ?) > 0)",
+-            # denied: 不包含 project_id
+             "(denied_projects = '[]' OR instr(denied_projects, ?) = 0)",
+         ]
+         project_id_pattern = f'"{project_id}"'
+         params: list = [project_id_pattern, project_id_pattern]
+ 
+-        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        extra_sql, extra_params = cls._optional_filters(modules, types, min_confidence)
+         conditions.append(extra_sql)
+         params.extend(extra_params)
+ 
++        if tags:
++            tag_sql, tag_params = cls._build_tag_sql(tags)
++            conditions.append(tag_sql)
++            params.extend(tag_params)
++
+         where = " AND ".join(conditions)
+         return FilterClause(where, params)
+ 
+@@ -95,35 +106,38 @@ class FilterBuilder:
+         cls,
+         modules: list[str] | None = None,
+         types: list[str] | None = None,
++        tags: list[str] | None = None,
+         min_confidence: float | None = None,
+     ) -> FilterClause:
+         """scope=global + status=approved。"""
+         conditions = ["scope = 'global'", "status = 'approved'"]
+         params: list = []
+ 
+-        extra_sql, extra_params = cls._optional_filters(modules, types, None, min_confidence)
++        extra_sql, extra_params = cls._optional_filters(modules, types, min_confidence)
+         conditions.append(extra_sql)
+         params.extend(extra_params)
+ 
++        if tags:
++            tag_sql, tag_params = cls._build_tag_sql(tags)
++            conditions.append(tag_sql)
++            params.extend(tag_params)
++
+         where = " AND ".join(conditions)
+         return FilterClause(where, params)
+ 
+     @classmethod
+-    def build_tag_filter(
+-        cls,
+-        tags: list[str],
+-    ) -> FilterClause:
++    def _build_tag_sql(cls, tags: list[str]) -> tuple[str, list]:
+         """
+-        标签过滤 — 通过 memory_tags 子查询。
++        标签子查询 SQL（用于 WHERE 条件）。
+ 
+-        注意：此过滤在三级范围外单独叠加。
++        使用 EXISTS + IN 确保 tag 过滤在 SQL 层完成，不会被 Python 截断漏掉。
+         """
+-        if not tags:
+-            return FilterClause("1=1", [])
+         placeholders = ", ".join("?" for _ in tags)
+-        # 使用 memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (...))
+-        sql = f"id IN (SELECT DISTINCT memory_id FROM memory_tags WHERE tag IN ({placeholders}))"
+-        return FilterClause(sql, list(tags))
++        sql = (
++            f"EXISTS (SELECT 1 FROM memory_tags mt "
++            f"WHERE mt.memory_id = memory_items.id AND mt.tag IN ({placeholders}))"
++        )
++        return sql, list(tags)
+ 
+     # ------------------------------------------------------------------
+     # 内部工具
+@@ -144,7 +158,6 @@ class FilterBuilder:
+         cls,
+         modules: list[str] | None,
+         types: list[str] | None,
+-        tags: list[str] | None,
+         min_confidence: float | None,
+     ) -> tuple[str, list]:
+         """构建可选过滤条件。返回 (sql, params)。"""
+diff --git a/src/project_memory_mcp/retrieval/keyword_search.py b/src/project_memory_mcp/retrieval/keyword_search.py
+index 603f91d..02b3b5e 100644
+--- a/src/project_memory_mcp/retrieval/keyword_search.py
++++ b/src/project_memory_mcp/retrieval/keyword_search.py
+@@ -9,6 +9,28 @@ from .filter_builder import FilterBuilder
+ 
+ _TOKENIZE_RE = re.compile(r"\s+")
+ 
++# LIKE 转义字符
++_LIKE_ESCAPE_CHAR = "\\"
++
++
++def escape_like(value: str) -> str:
++    """转义 LIKE 通配符 % _ 和转义符本身。"""
++    return (
++        value.replace("\\", "\\\\")
++        .replace("%", "\\%")
++        .replace("_", "\\_")
++    )
++
++
++def like_pattern(value: str) -> str:
++    """构建 LIKE 模式并转义。"""
++    return f"%{escape_like(value)}%"
++
++
++def like_clause(field: str) -> str:
++    """构建字段 LIKE 子句，带 ESCAPE。"""
++    return f"{field} LIKE ? ESCAPE '{_LIKE_ESCAPE_CHAR}'"
++
+ 
+ class KeywordSearchService:
+     """
+@@ -60,7 +82,7 @@ class KeywordSearchService:
+         all_results.extend(
+             self._search_project_scope(
+                 project_id, keywords,
+-                include_candidates, modules, types, min_confidence, max_results,
++                include_candidates, modules, types, tags, min_confidence, max_results,
+             )
+         )
+ 
+@@ -68,20 +90,16 @@ class KeywordSearchService:
+         if include_shared:
+             all_results.extend(
+                 self._search_shared_scope(
+-                    keywords, project_id, modules, types, min_confidence,
++                    keywords, project_id, modules, types, tags, min_confidence,
+                 )
+             )
+ 
+         # 3. global scope
+         if include_global:
+             all_results.extend(
+-                self._search_global_scope(keywords, modules, types, min_confidence)
++                self._search_global_scope(keywords, modules, types, tags, min_confidence)
+             )
+ 
+-        # 标签过滤
+-        if tags:
+-            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
+-
+         # 去重（同 id 取最高分）
+         seen: dict[str, SearchResult] = {}
+         for r in all_results:
+@@ -109,7 +127,7 @@ class KeywordSearchService:
+         all_results: list[SearchResult] = []
+ 
+         clause = FilterBuilder.build_project_filter(
+-            project_id, include_candidates, modules, types, min_confidence,
++            project_id, include_candidates, modules, types, tags, min_confidence,
+         )
+         rows = self.conn.execute(
+             f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
+@@ -119,7 +137,7 @@ class KeywordSearchService:
+ 
+         if include_shared:
+             clause = FilterBuilder.build_shared_filter(
+-                project_id, modules, types, min_confidence,
++                project_id, modules, types, tags, min_confidence,
+             )
+             rows = self.conn.execute(
+                 f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
+@@ -128,17 +146,13 @@ class KeywordSearchService:
+             all_results.extend(self._rows_to_results(rows, project_id))
+ 
+         if include_global:
+-            clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
++            clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
+             rows = self.conn.execute(
+                 f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
+                 clause.params + [max_results],
+             ).fetchall()
+             all_results.extend(self._rows_to_results(rows, project_id))
+ 
+-        # 标签过滤
+-        if tags:
+-            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
+-
+         return all_results
+ 
+     # ------------------------------------------------------------------
+@@ -146,25 +160,25 @@ class KeywordSearchService:
+     # ------------------------------------------------------------------
+ 
+     def _search_project_scope(
+-        self, project_id, keywords, include_candidates, modules, types, min_confidence, max_results,
++        self, project_id, keywords, include_candidates, modules, types, tags, min_confidence, max_results,
+     ) -> list[SearchResult]:
+         clause = FilterBuilder.build_project_filter(
+-            project_id, include_candidates, modules, types, min_confidence,
++            project_id, include_candidates, modules, types, tags, min_confidence,
+         )
+         return self._execute_search(clause, keywords, project_id, max_results)
+ 
+     def _search_shared_scope(
+-        self, keywords, project_id, modules, types, min_confidence,
++        self, keywords, project_id, modules, types, tags, min_confidence,
+     ) -> list[SearchResult]:
+         clause = FilterBuilder.build_shared_filter(
+-            project_id, modules, types, min_confidence,
++            project_id, modules, types, tags, min_confidence,
+         )
+         return self._execute_search(clause, keywords, project_id, 20)
+ 
+     def _search_global_scope(
+-        self, keywords, modules, types, min_confidence,
++        self, keywords, modules, types, tags, min_confidence,
+     ) -> list[SearchResult]:
+-        clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
++        clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
+         return self._execute_search(clause, keywords, None, 20)
+ 
+     def _execute_search(
+@@ -207,15 +221,17 @@ class KeywordSearchService:
+         params: list = []
+         for field, weight in self.FIELD_WEIGHTS:
+             for kw in keywords:
+-                parts.append(f"CASE WHEN {field} LIKE ? THEN {weight} ELSE 0 END")
+-                params.append(f"%{kw}%")
++                parts.append(
++                    f"CASE WHEN {like_clause(field)} THEN {weight} ELSE 0 END"
++                )
++                params.append(like_pattern(kw))
+         for kw in keywords:
+             parts.append(
+                 f"CASE WHEN id IN "
+-                f"(SELECT memory_id FROM memory_tags WHERE tag LIKE ?) "
++                f"(SELECT memory_id FROM memory_tags WHERE {like_clause('tag')}) "
+                 f"THEN {self.TAG_WEIGHT} ELSE 0 END"
+             )
+-            params.append(f"%{kw}%")
++            params.append(like_pattern(kw))
+         return parts, params
+ 
+     def _build_where(self, keywords: list[str]) -> tuple[list[str], list]:
+@@ -224,13 +240,13 @@ class KeywordSearchService:
+         params: list = []
+         for field, _ in self.FIELD_WEIGHTS:
+             for kw in keywords:
+-                conds.append(f"{field} LIKE ?")
+-                params.append(f"%{kw}%")
++                conds.append(like_clause(field))
++                params.append(like_pattern(kw))
+         for kw in keywords:
+             conds.append(
+-                f"id IN (SELECT memory_id FROM memory_tags WHERE tag LIKE ?)"
++                f"id IN (SELECT memory_id FROM memory_tags WHERE {like_clause('tag')})"
+             )
+-            params.append(f"%{kw}%")
++            params.append(like_pattern(kw))
+         return conds, params
+ 
+     # ------------------------------------------------------------------
+diff --git a/src/project_memory_mcp/retrieval/search.py b/src/project_memory_mcp/retrieval/search.py
+index 13e2248..40782d7 100644
+--- a/src/project_memory_mcp/retrieval/search.py
++++ b/src/project_memory_mcp/retrieval/search.py
+@@ -3,7 +3,6 @@
+ import sqlite3
+ 
+ from ..models.search_result import SearchResultSet
+-from ..models.context_pack import ContextPack, ContextPackItem
+ from .keyword_search import KeywordSearchService
+ from .ranker import ResultRanker
+ 
+@@ -101,56 +100,16 @@ class KnowledgeSearchService:
+         merged = self.ranker.merge(keyword_results, semantic_results)
+         total_found = len(merged)
+ 
+-        # 4. 全局截断后构建 context_pack
++        # 4. 全局截断后构建 context_pack（复用 ResultRanker）
+         limited = merged[:max_results]
+-
+-        # Re-count actual scope counts for summary
+-        p_count = sum(1 for r in limited if r.scope == "project")
+-        s_count = sum(1 for r in limited if r.scope == "shared")
+-        g_count = sum(1 for r in limited if r.scope == "global")
+-        context_pack = ContextPack(
+-            summary=f"找到 {p_count} 条项目知识、{s_count} 条共享知识、{g_count} 条全局知识。",
+-            project_context=[
+-                ContextPackItem(
+-                    id=r.id, title=r.title, content=r.content,
+-                    type=r.type, module=r.module, scope=r.scope,
+-                    confidence=r.confidence, risk_level=r.risk_level,
+-                    tags=r.tags, source_evidence=r.source_evidence,
+-                    match_type=r.match_type, relevance_score=r.relevance_score,
+-                    from_project=r.from_project or project_id,
+-                )
+-                for r in limited if r.scope == "project"
+-            ],
+-            shared_context=[
+-                ContextPackItem(
+-                    id=r.id, title=r.title, content=r.content,
+-                    type=r.type, module=r.module, scope=r.scope,
+-                    confidence=r.confidence, risk_level=r.risk_level,
+-                    tags=r.tags, source_evidence=r.source_evidence,
+-                    match_type=r.match_type, relevance_score=r.relevance_score,
+-                    from_project=r.from_project or project_id,
+-                )
+-                for r in limited if r.scope == "shared"
+-            ],
+-            global_context=[
+-                ContextPackItem(
+-                    id=r.id, title=r.title, content=r.content,
+-                    type=r.type, module=r.module, scope=r.scope,
+-                    confidence=r.confidence, risk_level=r.risk_level,
+-                    tags=r.tags, source_evidence=r.source_evidence,
+-                    match_type=r.match_type, relevance_score=r.relevance_score,
+-                    from_project=r.from_project or project_id,
+-                )
+-                for r in limited if r.scope == "global"
+-            ],
+-        )
++        cp = self.ranker.build_context_pack(limited, query, project_id)
+ 
+         return SearchResultSet(
+             query=query,
+             project_id=project_id,
+             project_resolved=True,
+             context_pack={
+-                "summary": context_pack.summary,
++                "summary": cp.summary,
+                 "project_context": [
+                     {
+                         "id": i.id, "title": i.title, "content": i.content,
+@@ -160,7 +119,7 @@ class KnowledgeSearchService:
+                         "match_type": i.match_type, "relevance_score": i.relevance_score,
+                         "from_project": i.from_project,
+                     }
+-                    for i in context_pack.project_context
++                    for i in cp.project_context
+                 ],
+                 "shared_context": [
+                     {
+@@ -171,7 +130,7 @@ class KnowledgeSearchService:
+                         "match_type": i.match_type, "relevance_score": i.relevance_score,
+                         "from_project": i.from_project,
+                     }
+-                    for i in context_pack.shared_context
++                    for i in cp.shared_context
+                 ],
+                 "global_context": [
+                     {
+@@ -182,7 +141,7 @@ class KnowledgeSearchService:
+                         "match_type": i.match_type, "relevance_score": i.relevance_score,
+                         "from_project": i.from_project,
+                     }
+-                    for i in context_pack.global_context
++                    for i in cp.global_context
+                 ],
+             },
+             total_found=total_found,
+diff --git a/tests/test_search.py b/tests/test_search.py
+index 950948b..263469e 100644
+--- a/tests/test_search.py
++++ b/tests/test_search.py
+@@ -486,3 +486,141 @@ class TestScopeNotPreempted:
+         result = search_svc.search("proj-a", "Python 虚拟环境")
+         global_titles = {i["title"] for i in result.context_pack["global_context"]}
+         assert "全局Python经验" in global_titles
++
++# ------------------------------------------------------------------
++# Phase 3.2 新增：Tag SQL 过滤不丢数据
++# ------------------------------------------------------------------
++
++class TestTagSqlFiltering:
++    """验证 tag 过滤在 SQL 层完成，不会因 LIMIT 丢失数据。"""
++
++    def test_34_rare_tag_found_with_empty_query(self, project_repo, memory_repo, search_svc):
++        """30 条无 tag 知识 + 1 条旧 rare tag 知识，空 query 能搜到 rare。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        # 30 条无 tag 新知识
++        for i in range(30):
++            content = f"common knowledge {i}"
++            item = MemoryItem(
++                project_id='proj-a', title=f'公共知识{i}', content=content,
++                content_hash=compute_content_hash(content), status='approved',
++                scope='project', source_type='manual_input'
++            )
++            memory_repo.create_memory(item, actor='seed')
++        # 1 条带 rare tag 的旧知识
++        content = 'rare content'
++        item = MemoryItem(
++            project_id='proj-a', title='稀有知识', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input', tags=['rare']
++        )
++        memory_repo.create_memory(item, actor='seed')
++
++        result = search_svc.search("proj-a", "", tags=["rare"], max_results=10)
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "稀有知识" in titles, f"rare tag not found, got: {titles}"
++
++    def test_35_rare_tag_found_with_query(self, project_repo, memory_repo, search_svc):
++        """非空 query 也能搜到 rare tag。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        for i in range(30):
++            content = f"common knowledge {i}"
++            item = MemoryItem(
++                project_id='proj-a', title=f'公共稀缺知识{i}', content=content,
++                content_hash=compute_content_hash(content), status='approved',
++                scope='project', source_type='manual_input'
++            )
++            memory_repo.create_memory(item, actor='seed')
++        content = 'rare content with keyword'
++        item = MemoryItem(
++            project_id='proj-a', title='稀有稀有知识', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input', tags=['rare']
++        )
++        memory_repo.create_memory(item, actor='seed')
++
++        result = search_svc.search("proj-a", "稀有", tags=["rare"], max_results=10)
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "稀有稀有知识" in titles
++
++
++# ------------------------------------------------------------------
++# Phase 3.2 新增：LIKE 转义测试
++# ------------------------------------------------------------------
++
++class TestLikeEscape:
++    """LIKE 通配符转义测试。"""
++
++    def test_36_percent_query_not_match_normal(self, project_repo, memory_repo, search_svc):
++        """query 为 % 时不应匹配没有 % 的普通内容。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'normal content without percent sign'
++        item = MemoryItem(
++            project_id='proj-a', title='普通知识', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input'
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "%")
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "普通知识" not in titles, "% should be escaped, not wildcard"
++
++    def test_37_underscore_query_not_match_normal(self, project_repo, memory_repo, search_svc):
++        """query 为 _ 时不应匹配没有 _ 的普通内容。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'abc def ghi jkl'
++        item = MemoryItem(
++            project_id='proj-a', title='无下划线', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input'
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "_")
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        assert "无下划线" not in titles, "_ should be escaped, not single-char wildcard"
++
++    def test_38_percent_in_content_searchable(self, project_repo, memory_repo, search_svc):
++        """内容中真的包含 % 时 query % 可以搜到。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'discount 50% off'
++        item = MemoryItem(
++            project_id='proj-a', title='打折信息', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input'
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "%")
++        titles = {i["title"] for i in result.context_pack["project_context"]}
++        # query "%" 转义后匹配文本中的 "%"
++        assert "打折信息" in titles
++
++    def test_39_underscore_in_tag_searchable(self, project_repo, memory_repo, search_svc):
++        """tag 中真的包含 _ 时 query _ 可以搜到。"""
++        for pid in ['proj-a', 'shared']:
++            pa = Project(id=pid, name=pid, slug=pid, status='active', root_paths=[], tech_stack=[])
++            project_repo.upsert_project(pa, actor='seed')
++        content = 'tag with underscore'
++        item = MemoryItem(
++            project_id='proj-a', title='下划线标签', content=content,
++            content_hash=compute_content_hash(content), status='approved',
++            scope='project', source_type='manual_input', tags=['tag_with_underscore']
++        )
++        memory_repo.create_memory(item, actor='seed')
++        result = search_svc.search("proj-a", "_")
++        # query "_" 应能通过 tag LIKE 匹配到 "tag_with_underscore"
++        # 因为 tag 里确实含有 _
++        any_match = False
++        for items in [result.context_pack["project_context"]]:
++            for i in items:
++                if "下划线标签" == i["title"]:
++                    any_match = True
++        assert any_match, "tag with _ should match query _"

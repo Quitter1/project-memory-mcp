@@ -9,6 +9,28 @@ from .filter_builder import FilterBuilder
 
 _TOKENIZE_RE = re.compile(r"\s+")
 
+# LIKE 转义字符
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def escape_like(value: str) -> str:
+    """转义 LIKE 通配符 % _ 和转义符本身。"""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def like_pattern(value: str) -> str:
+    """构建 LIKE 模式并转义。"""
+    return f"%{escape_like(value)}%"
+
+
+def like_clause(field: str) -> str:
+    """构建字段 LIKE 子句，带 ESCAPE。"""
+    return f"{field} LIKE ? ESCAPE '{_LIKE_ESCAPE_CHAR}'"
+
 
 class KeywordSearchService:
     """
@@ -60,7 +82,7 @@ class KeywordSearchService:
         all_results.extend(
             self._search_project_scope(
                 project_id, keywords,
-                include_candidates, modules, types, min_confidence, max_results,
+                include_candidates, modules, types, tags, min_confidence, max_results,
             )
         )
 
@@ -68,19 +90,15 @@ class KeywordSearchService:
         if include_shared:
             all_results.extend(
                 self._search_shared_scope(
-                    keywords, project_id, modules, types, min_confidence,
+                    keywords, project_id, modules, types, tags, min_confidence,
                 )
             )
 
         # 3. global scope
         if include_global:
             all_results.extend(
-                self._search_global_scope(keywords, modules, types, min_confidence)
+                self._search_global_scope(keywords, modules, types, tags, min_confidence)
             )
-
-        # 标签过滤
-        if tags:
-            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
 
         # 去重（同 id 取最高分）
         seen: dict[str, SearchResult] = {}
@@ -109,7 +127,7 @@ class KeywordSearchService:
         all_results: list[SearchResult] = []
 
         clause = FilterBuilder.build_project_filter(
-            project_id, include_candidates, modules, types, min_confidence,
+            project_id, include_candidates, modules, types, tags, min_confidence,
         )
         rows = self.conn.execute(
             f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
@@ -119,7 +137,7 @@ class KeywordSearchService:
 
         if include_shared:
             clause = FilterBuilder.build_shared_filter(
-                project_id, modules, types, min_confidence,
+                project_id, modules, types, tags, min_confidence,
             )
             rows = self.conn.execute(
                 f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
@@ -128,16 +146,12 @@ class KeywordSearchService:
             all_results.extend(self._rows_to_results(rows, project_id))
 
         if include_global:
-            clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
+            clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
             rows = self.conn.execute(
                 f"SELECT * FROM memory_items WHERE {clause.sql} ORDER BY updated_at DESC LIMIT ?",
                 clause.params + [max_results],
             ).fetchall()
             all_results.extend(self._rows_to_results(rows, project_id))
-
-        # 标签过滤
-        if tags:
-            all_results = [r for r in all_results if any(t in r.tags for t in tags)]
 
         return all_results
 
@@ -146,25 +160,25 @@ class KeywordSearchService:
     # ------------------------------------------------------------------
 
     def _search_project_scope(
-        self, project_id, keywords, include_candidates, modules, types, min_confidence, max_results,
+        self, project_id, keywords, include_candidates, modules, types, tags, min_confidence, max_results,
     ) -> list[SearchResult]:
         clause = FilterBuilder.build_project_filter(
-            project_id, include_candidates, modules, types, min_confidence,
+            project_id, include_candidates, modules, types, tags, min_confidence,
         )
         return self._execute_search(clause, keywords, project_id, max_results)
 
     def _search_shared_scope(
-        self, keywords, project_id, modules, types, min_confidence,
+        self, keywords, project_id, modules, types, tags, min_confidence,
     ) -> list[SearchResult]:
         clause = FilterBuilder.build_shared_filter(
-            project_id, modules, types, min_confidence,
+            project_id, modules, types, tags, min_confidence,
         )
         return self._execute_search(clause, keywords, project_id, 20)
 
     def _search_global_scope(
-        self, keywords, modules, types, min_confidence,
+        self, keywords, modules, types, tags, min_confidence,
     ) -> list[SearchResult]:
-        clause = FilterBuilder.build_global_filter(modules, types, min_confidence)
+        clause = FilterBuilder.build_global_filter(modules, types, tags, min_confidence)
         return self._execute_search(clause, keywords, None, 20)
 
     def _execute_search(
@@ -207,15 +221,17 @@ class KeywordSearchService:
         params: list = []
         for field, weight in self.FIELD_WEIGHTS:
             for kw in keywords:
-                parts.append(f"CASE WHEN {field} LIKE ? THEN {weight} ELSE 0 END")
-                params.append(f"%{kw}%")
+                parts.append(
+                    f"CASE WHEN {like_clause(field)} THEN {weight} ELSE 0 END"
+                )
+                params.append(like_pattern(kw))
         for kw in keywords:
             parts.append(
                 f"CASE WHEN id IN "
-                f"(SELECT memory_id FROM memory_tags WHERE tag LIKE ?) "
+                f"(SELECT memory_id FROM memory_tags WHERE {like_clause('tag')}) "
                 f"THEN {self.TAG_WEIGHT} ELSE 0 END"
             )
-            params.append(f"%{kw}%")
+            params.append(like_pattern(kw))
         return parts, params
 
     def _build_where(self, keywords: list[str]) -> tuple[list[str], list]:
@@ -224,13 +240,13 @@ class KeywordSearchService:
         params: list = []
         for field, _ in self.FIELD_WEIGHTS:
             for kw in keywords:
-                conds.append(f"{field} LIKE ?")
-                params.append(f"%{kw}%")
+                conds.append(like_clause(field))
+                params.append(like_pattern(kw))
         for kw in keywords:
             conds.append(
-                f"id IN (SELECT memory_id FROM memory_tags WHERE tag LIKE ?)"
+                f"id IN (SELECT memory_id FROM memory_tags WHERE {like_clause('tag')})"
             )
-            params.append(f"%{kw}%")
+            params.append(like_pattern(kw))
         return conds, params
 
     # ------------------------------------------------------------------

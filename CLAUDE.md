@@ -236,3 +236,31 @@ review-pack-phase-2.zip
 python scripts/make_review_pack.py --phase 2 --test "pytest tests/test_config_loader.py tests/test_resolver.py -v"
 
 完成后输出 zip 路径和包含文件数量。
+
+## 审阅规则
+
+每个阶段完成后，必须输出以下 5 项供外部审阅：
+
+1. **review-pack zip** — 完整源码审阅包
+2. **phase summary** — progress/phase-{n}-summary.md
+3. **test-output** — progress/test-output-phase-{n}.txt
+4. **git-status** — progress/git-status-phase-{n}.txt
+5. **git-diff** — progress/git-diff-phase-{n}.patch
+
+## 提交提醒
+
+每个阶段通过审阅后，提醒用户做一次 Git commit：
+
+```bash
+git add .
+git commit -m "phase 0-{n} {阶段名}"
+```
+
+例如：
+
+```bash
+git add .
+git commit -m "phase 0-3.2 search foundation"
+```
+
+这样后续阶段的 `git diff` 才真正有价值。
