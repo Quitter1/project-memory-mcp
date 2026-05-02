@@ -1,0 +1,43 @@
+# ================================================================
+# 服务级配置 — project-memory-mcp
+# ================================================================
+
+server:
+  name: "project-memory-mcp"
+  version: "0.1.0"
+  log_level: "INFO"
+  log_file: "data/logs/mcp-server.log"
+
+# 数据库
+database:
+  path: "data/memory.db"
+  backup_enabled: false              # MVP 阶段暂不开启自动备份
+
+# Qdrant 连接（MVP 阶段不启用，仅预留配置）
+qdrant:
+  enabled: false
+  host: "127.0.0.1"
+  http_port: 6333
+  grpc_port: 6334
+  executable_path: "qdrant/qdrant.exe"
+  storage_path: "qdrant/storage"
+  collection: "project_memory_default"
+  api_key: null
+  timeout_seconds: 10
+
+# Embedding 配置
+embedding:
+  provider: "mock"                    # mock | http | local（MVP 用 mock）
+  model: "mock-embedding-v1"
+  dimension: 768
+  batch_size: 32
+
+# 审核器
+reviewer:
+  provider: "rule-based"             # rule-based | llm（MVP 用 rule-based）
+  llm_model: null                    # 预留 LLM reviewer 配置
+
+# 备份
+backup:
+  jsonl_enabled: false               # MVP 阶段暂不开启
+  output_dir: "data/backups"

@@ -1,0 +1,95 @@
+# ================================================================
+# 全局知识入库策略规则 — project-memory-mcp
+# ================================================================
+# 此文件定义所有项目共享的全局策略规则。
+# 项目级覆盖在 projects.yml 中各项目的 knowledge_policy / review_policy 下。
+# ================================================================
+
+# ------------------------------------------------------------------
+# 敏感信息检测规则
+# ------------------------------------------------------------------
+sensitive_detection:
+
+  # 严重违规（blocked）— 命中后不保存原文，直接拒绝
+  blocked:
+    - name: "私钥"
+      pattern: "-----BEGIN (?:RSA|EC|DSA|OPENSSH) PRIVATE KEY-----"
+      description: "SSH/TLS 私钥，绝对禁止入库"
+
+    - name: "AWS Access Key"
+      pattern: "AKIA[0-9A-Z]{16}"
+      description: "AWS IAM 访问密钥"
+
+    - name: "数据库连接密码（明文）"
+      pattern: "password\\s*=\\s*['\"]?(?!\\$\\{)[^'\"]{6,}"
+      description: "非占位符形式的数据库密码"
+
+    - name: "JDBC URL 含密码"
+      pattern: "jdbc:.*password=[^&\\s]+"
+      description: "JDBC 连接串包含明文密码"
+
+  # 疑似违规（risk_level=high）— 可保存内容，但强制 pending_review
+  warning:
+    - name: "API Key 赋值"
+      pattern: "(?:api[_-]?key|apikey|secret[_-]?key)\\s*[:=]\\s*['\"]?[\\w\\-]{20,}"
+      description: "API Key 直接出现在文本中"
+
+    - name: "Token 赋值"
+      pattern: "(?:token|access[_-]?token|bearer)\\s*[:=]\\s*['\"]?[\\w\\-\\.]{20,}"
+      description: "Access Token 直接出现在文本中"
+
+    - name: "大段源码"
+      max_code_lines: 50
+      description: "超过 50 行连续代码，应引用文件路径而非粘贴全文"
+
+    - name: "大段 SQL dump"
+      max_sql_length: 500
+      description: "SQL 语句超过 500 字符，应引用表名/文件名而非粘贴 SQL"
+
+# ------------------------------------------------------------------
+# 多因素自动审批规则（全局默认）
+# ------------------------------------------------------------------
+auto_approval:
+  # 以下条件必须同时满足才能自动批准：
+  conditions:
+    - "confidence >= project.auto_approve_threshold"
+    - "scope == 'project'"                       # shared/global 永远不自动批准
+    - "risk_level in ('low', 'medium')"          # high/critical 永远不自动批准
+    - "source_type in ('user_confirmed', 'code_verified', 'sql_verified')
+       OR (source_type == 'ai_inferred' AND project.review_policy.allow_ai_auto_approve)"
+    - "安全校验通过"
+    - "无内容哈希冲突"
+    - "无语义冲突"
+    - "type 不在 project.review_policy.forbidden_auto_types 中"
+
+# ------------------------------------------------------------------
+# 知识类型定义
+# ------------------------------------------------------------------
+knowledge_types:
+  - architecture      # 架构设计
+  - pattern           # 设计模式 / 惯用写法
+  - api               # API 接口规范
+  - data_model        # 数据模型
+  - business_rule     # 业务规则
+  - configuration     # 配置说明
+  - workaround        # 已知问题与解决方案
+  - convention        # 编码规范
+  - dependency        # 依赖关系
+  - security_config   # 安全配置
+  - test_knowledge    # 测试知识
+  - pitfall           # 踩坑记录
+  - decision          # 决策记录
+  - other             # 其他
+
+# ------------------------------------------------------------------
+# 标签分类
+# ------------------------------------------------------------------
+tag_categories:
+  - general           # 通用标签
+  - table_name        # 数据库表名
+  - field_name        # 数据库字段名
+  - file_name         # 文件名
+  - class_name        # 类名
+  - function_name     # 函数名
+  - module_name       # 模块名
+  - api_path          # API 路径

@@ -1,0 +1,60 @@
+============================= test session starts =============================
+platform win32 -- Python 3.10.6, pytest-9.0.3, pluggy-1.6.0 -- C:\Program Files\Python310\python.exe
+cachedir: .pytest_cache
+rootdir: F:\project\project-memory-mcp
+configfile: pyproject.toml
+plugins: anyio-4.13.0, asyncio-1.3.0
+asyncio: mode=strict, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 49 items
+
+tests/test_config_loader.py::test_01_load_projects_normal PASSED         [  2%]
+tests/test_config_loader.py::test_02_defaults_merged PASSED              [  4%]
+tests/test_config_loader.py::test_03_missing_required_field PASSED       [  6%]
+tests/test_config_loader.py::test_04_yaml_hash_stable PASSED             [  8%]
+tests/test_config_loader.py::test_05_empty_projects PASSED               [ 10%]
+tests/test_config_loader.py::test_06_list_active_projects PASSED         [ 12%]
+tests/test_config_loader.py::test_07_invalid_yaml PASSED                 [ 14%]
+tests/test_config_loader.py::test_08_unknown_fields_tolerated PASSED     [ 16%]
+tests/test_memory_repo.py::test_01_create_project PASSED                 [ 18%]
+tests/test_memory_repo.py::test_02_list_projects PASSED                  [ 20%]
+tests/test_memory_repo.py::test_03_update_project_status PASSED          [ 22%]
+tests/test_memory_repo.py::test_04_create_memory PASSED                  [ 24%]
+tests/test_memory_repo.py::test_05_find_by_hash PASSED                   [ 26%]
+tests/test_memory_repo.py::test_06_list_memories PASSED                  [ 28%]
+tests/test_memory_repo.py::test_07_update_status_no_delete PASSED        [ 30%]
+tests/test_memory_repo.py::test_08_update_memory_fields PASSED           [ 32%]
+tests/test_memory_repo.py::test_09_tags_association PASSED               [ 34%]
+tests/test_memory_repo.py::test_10_relations_between_items PASSED        [ 36%]
+tests/test_memory_repo.py::test_11_remove_relation PASSED                [ 38%]
+tests/test_memory_repo.py::test_12_audit_log_written PASSED              [ 40%]
+tests/test_memory_repo.py::test_13_status_change_audited PASSED          [ 42%]
+tests/test_memory_repo.py::test_14_foreign_keys_enforced PASSED          [ 44%]
+tests/test_memory_repo.py::test_15_wal_mode PASSED                       [ 46%]
+tests/test_memory_repo.py::test_16_multiple_items_same_project PASSED    [ 48%]
+tests/test_resolver.py::test_01_explicit_id PASSED                       [ 51%]
+tests/test_resolver.py::test_02_explicit_id_not_found PASSED             [ 53%]
+tests/test_resolver.py::test_03_workspace_path_windows PASSED            [ 55%]
+tests/test_resolver.py::test_04_workspace_path_linux PASSED              [ 57%]
+tests/test_resolver.py::test_05_changed_files PASSED                     [ 59%]
+tests/test_resolver.py::test_06_alias_match PASSED                       [ 61%]
+tests/test_resolver.py::test_07_tech_stack_match PASSED                  [ 63%]
+tests/test_resolver.py::test_08_module_keywords_match PASSED             [ 65%]
+tests/test_resolver.py::test_09_ambiguous_multi_match PASSED             [ 67%]
+tests/test_resolver.py::test_10_cannot_resolve PASSED                    [ 69%]
+tests/test_resolver.py::test_11_archived_not_auto_matched PASSED         [ 71%]
+tests/test_resolver.py::test_12_explicit_archived_with_warning PASSED    [ 73%]
+tests/test_resolver.py::test_13_case_insensitive_windows PASSED          [ 75%]
+tests/test_resolver.py::test_14_longest_prefix_selected PASSED           [ 77%]
+tests/test_sqlite_migrations.py::test_01_init_creates_database PASSED    [ 79%]
+tests/test_sqlite_migrations.py::test_02_repeat_migration_no_error PASSED [ 81%]
+tests/test_sqlite_migrations.py::test_03_schema_version_correct PASSED   [ 83%]
+tests/test_sqlite_migrations.py::test_04_projects_table_exists PASSED    [ 85%]
+tests/test_sqlite_migrations.py::test_05_memory_items_table_exists PASSED [ 87%]
+tests/test_sqlite_migrations.py::test_06_memory_tags_table_exists PASSED [ 89%]
+tests/test_sqlite_migrations.py::test_07_memory_relations_table_exists PASSED [ 91%]
+tests/test_sqlite_migrations.py::test_08_audit_log_table_exists PASSED   [ 93%]
+tests/test_sqlite_migrations.py::test_09_foreign_keys_enabled PASSED     [ 95%]
+tests/test_sqlite_migrations.py::test_10_wal_mode_enabled PASSED         [ 97%]
+tests/test_sqlite_migrations.py::test_11_essential_indexes_exist PASSED  [100%]
+
+============================= 49 passed in 0.60s ==============================
