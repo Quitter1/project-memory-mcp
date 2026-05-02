@@ -122,6 +122,10 @@ def run_tests(phase: int, test_cmd: str) -> tuple[bool, Path]:
         out_path.write_text("(未指定测试命令)", encoding="utf-8")
         return True, out_path
 
+    # Windows 下 pytest 可能不在 PATH，统一用 python -m pytest
+    if test_cmd.startswith("pytest"):
+        test_cmd = "python -m " + test_cmd
+
     print(f"  运行: {test_cmd}")
     rc, stdout, stderr = run_cmd(test_cmd)
     output = stdout + "\n" + stderr

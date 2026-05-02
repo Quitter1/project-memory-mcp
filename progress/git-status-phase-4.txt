@@ -1,0 +1,23 @@
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   CLAUDE.md
+	modified:   scripts/make_review_pack.py
+	modified:   src/project_memory_mcp/knowledge/deduplicator.py
+	modified:   src/project_memory_mcp/knowledge/governance.py
+	modified:   src/project_memory_mcp/knowledge/lifecycle.py
+	modified:   src/project_memory_mcp/knowledge/reviewer.py
+	modified:   src/project_memory_mcp/knowledge/validator.py
+	modified:   tests/test_governance.py
+	modified:   tests/test_validator.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	progress/git-diff-phase-4.patch
+	progress/git-status-phase-4.txt
+	progress/phase-4-summary.md
+	progress/test-output-phase-4.txt
+	progress/tree-phase-4.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

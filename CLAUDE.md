@@ -144,7 +144,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 2.7 — defaults 校验、唯一约束、or 默认值修复。
+当前阶段：阶段 4 — 知识治理（validator/deduplicator/lifecycle/reviewer/governance）。
 
 ### changed_files 路径规则
 
