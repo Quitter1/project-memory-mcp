@@ -225,9 +225,6 @@ class ContentValidator:
 
     # ── 递归扫描 source_evidence ───────────────────────────────────
 
-    # Phase 4.3: key 路径使用 $ 前缀区分（$key vs .value）
-    KEY_PATH_SEP = "$"
-
     def _walk_source_evidence(
         self, obj, prefix: str
     ) -> list[tuple[str, str]]:
@@ -236,16 +233,16 @@ class ContentValidator:
 
         返回 [(field_path, text), ...]。
         value 路径: source_evidence.nested.raw
-        key 路径:   source_evidence.$keyName（Phase 4.3 新增）
+        key 路径:   source_evidence.$key（Phase 4.4: 不包含原始 key 文本）
         list 路径:  source_evidence.items[0].context
         """
         results: list[tuple[str, str]] = []
         if isinstance(obj, dict):
             for key, value in obj.items():
                 val_path = f"{prefix}.{key}"
-                # Phase 4.3: dict key 也参与敏感信息扫描
+                # Phase 4.4: key 路径使用 $key 代替原始 key 文本，防止敏感信息通过 blocked_field 泄露
                 if isinstance(key, str):
-                    key_path = f"{prefix}.{self.KEY_PATH_SEP}{key}"
+                    key_path = self._safe_key_path(prefix)
                     results.append((key_path, key))
                 if isinstance(value, str):
                     results.append((val_path, value))
@@ -259,10 +256,10 @@ class ContentValidator:
                 if isinstance(item, str):
                     results.append((idx_path, item))
                 elif isinstance(item, dict):
-                    # Phase 4.3: list 内 dict 的 key 也扫描
+                    # Phase 4.4: list 内 dict 的 key 也扫描，使用 $key
                     for key, value in item.items():
                         if isinstance(key, str):
-                            key_path = f"{idx_path}.{self.KEY_PATH_SEP}{key}"
+                            key_path = self._safe_key_path(idx_path)
                             results.append((key_path, key))
                         val_path = f"{idx_path}.{key}"
                         if isinstance(value, str):
@@ -272,3 +269,8 @@ class ContentValidator:
                 elif isinstance(item, list):
                     results.extend(self._walk_source_evidence(item, idx_path))
         return results
+
+    @staticmethod
+    def _safe_key_path(prefix: str) -> str:
+        """返回安全的 key 路径，不包含原始 key 文本。"""
+        return f"{prefix}.$key"

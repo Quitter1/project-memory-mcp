@@ -1006,7 +1006,7 @@ class TestGovernancePropose:
         )
         assert result["status"] == "rejected"
         assert result["validation"]["blocked"] is True
-        assert "$OPENAI_API_KEY" in result["validation"]["blocked_field"]
+        assert "$key" in result["validation"]["blocked_field"]
 
     def test_51_audit_no_raw_key_text(
         self, governance, project_repo, project_config, audit_repo,
@@ -1295,3 +1295,72 @@ class TestGovernanceApproveReject:
             actor="test",
         )
         assert result["status"] in ("approved", "pending_review")
+
+    # ── Phase 4.4: blocked_field 安全 ──
+
+    def test_60_blocked_field_no_raw_key_in_result(
+        self, governance, project_repo, project_config,
+    ):
+        """返回结果的 blocked_field 不含原始 key 文本。"""
+        _seed_project(project_repo, project_config)
+        result = governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+            actor="test",
+        )
+        bf = result["validation"]["blocked_field"]
+        assert "OPENAI_API_KEY" not in bf
+        assert "sk-" not in bf
+        assert "$key" in bf
+
+    def test_61_audit_log_blocked_field_no_raw_key(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """audit_log 中的 blocked_field 不含原始 key 文本。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+            actor="test",
+        )
+        import json as _json
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        nv = _json.dumps(blocked_logs[0].get("new_value") or {}, ensure_ascii=False)
+        assert "OPENAI_API_KEY" not in nv
+        assert "sk-proj" not in nv
+        assert "$key" in nv
+
+    def test_62_nested_key_audit_safe(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """嵌套 key 命中后 audit_log blocked_field 为 source_evidence.nested.$key。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "nested": {
+                    "token=ghp_abcdefghijklmnopqrstuvwxyz": "safe",
+                },
+            },
+            actor="test",
+        )
+        import json as _json
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        nv = _json.dumps(blocked_logs[0].get("new_value") or {}, ensure_ascii=False)
+        assert "token=" not in nv
+        assert "ghp_" not in nv
+        assert "$key" in nv

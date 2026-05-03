@@ -26,6 +26,33 @@ class GovernanceError(Exception):
     pass
 
 
+# Phase 4.4: blocked_field 脱敏 — 不允许敏感字符串出现在审计日志和返回值中
+_SENSITIVE_FIELD_MARKERS = (
+    "sk-", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+    "token=", "password=", "pwd=", "bearer", "secret",
+)
+
+
+def sanitize_blocked_field(field: str) -> str:
+    """对 blocked_field 做安全脱敏，移除可能包含的敏感 key 原文。"""
+    if not field:
+        return field
+
+    for marker in _SENSITIVE_FIELD_MARKERS:
+        if marker.lower() in field.lower():
+            # 将 source_evidence 下含敏感 key 的路径替换为安全的 $key 路径
+            parts = field.split(".")
+            safe_parts: list[str] = []
+            for p in parts:
+                if any(m.lower() in p.lower() for m in _SENSITIVE_FIELD_MARKERS):
+                    safe_parts.append("$key")
+                else:
+                    safe_parts.append(p)
+            return ".".join(safe_parts)
+
+    return field
+
+
 class KnowledgeGovernance:
     """
     知识治理核心。
@@ -116,7 +143,7 @@ class KnowledgeGovernance:
                     "source_evidence_key_count": len(source_evidence) if source_evidence else 0,
                     "tag_count": len(tags) if tags else 0,
                     "blocked_reason": validation.blocked_reason,
-                    "blocked_field": validation.blocked_field,
+                    "blocked_field": sanitize_blocked_field(validation.blocked_field),
                     "type": knowledge_type,
                     "module": module,
                     "source_type": source_type,
@@ -144,7 +171,7 @@ class KnowledgeGovernance:
                     "passed": False,
                     "blocked": True,
                     "blocked_reason": validation.blocked_reason,
-                    "blocked_field": validation.blocked_field,
+                    "blocked_field": sanitize_blocked_field(validation.blocked_field),
                     "warnings": validation.warnings,
                 },
                 "review_decision": {

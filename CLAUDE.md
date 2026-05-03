@@ -144,7 +144,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 4.3 — 知识治理安全收口（source_evidence key 扫描/审计日志去 raw key/裸 sk- 增强/tags 类型校验）。
+当前阶段：阶段 4.4 — 知识治理安全收口（blocked_field 脱敏/audit_log 安全化/$key 安全路径）。
 
 ### changed_files 路径规则
 

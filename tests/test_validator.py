@@ -388,7 +388,7 @@ class TestPersistedPayload:
             },
         )
         assert result.blocked is True
-        assert "$OPENAI_API_KEY" in result.blocked_field
+        assert "$key" in result.blocked_field
 
     def test_32_nested_key_with_token_blocked(self, validator):
         result = validator.validate_persisted_payload(
@@ -401,7 +401,7 @@ class TestPersistedPayload:
             },
         )
         assert result.blocked is True
-        assert "$token" in result.blocked_field
+        assert "$key" in result.blocked_field
         assert "nested" in result.blocked_field
 
     def test_33_list_dict_key_with_password_blocked(self, validator):
@@ -415,5 +415,52 @@ class TestPersistedPayload:
             },
         )
         assert result.blocked is True
-        assert "$password" in result.blocked_field
+        assert "$key" in result.blocked_field
         assert "items[0]" in result.blocked_field
+
+    # ── Phase 4.4: blocked_field 不包含原始敏感 key ──
+
+    def test_34_blocked_field_no_raw_api_key(self, validator):
+        """source_evidence key 含 API key → blocked_field 不含原始 key。"""
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+        )
+        assert result.blocked is True
+        assert "OPENAI_API_KEY" not in result.blocked_field
+        assert "sk-" not in result.blocked_field
+        assert "$key" in result.blocked_field
+
+    def test_35_nested_key_safe_path(self, validator):
+        """嵌套 key 的 blocked_field 不包含 token= 原文。"""
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "nested": {
+                    "token=ghp_abcdefghijklmnopqrstuvwxyz": "safe",
+                },
+            },
+        )
+        assert result.blocked is True
+        assert "token=" not in result.blocked_field
+        assert "$key" in result.blocked_field
+        assert result.blocked_field == "source_evidence.nested.$key"
+
+    def test_36_list_dict_key_safe_path(self, validator):
+        """list 内 dict key 的 blocked_field 不包含 password= 原文。"""
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "items": [
+                    {"password=secret123": "safe"},
+                ],
+            },
+        )
+        assert result.blocked is True
+        assert "password=secret123" not in result.blocked_field
+        assert "$key" in result.blocked_field

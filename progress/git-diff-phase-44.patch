@@ -1,0 +1,287 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 04697e4..ca10f65 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -144,7 +144,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 4.3 — 知识治理安全收口（source_evidence key 扫描/审计日志去 raw key/裸 sk- 增强/tags 类型校验）。
++当前阶段：阶段 4.4 — 知识治理安全收口（blocked_field 脱敏/audit_log 安全化/$key 安全路径）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/src/project_memory_mcp/knowledge/governance.py b/src/project_memory_mcp/knowledge/governance.py
+index 99f1712..de00173 100644
+--- a/src/project_memory_mcp/knowledge/governance.py
++++ b/src/project_memory_mcp/knowledge/governance.py
+@@ -26,6 +26,33 @@ class GovernanceError(Exception):
+     pass
+ 
+ 
++# Phase 4.4: blocked_field 脱敏 — 不允许敏感字符串出现在审计日志和返回值中
++_SENSITIVE_FIELD_MARKERS = (
++    "sk-", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
++    "token=", "password=", "pwd=", "bearer", "secret",
++)
++
++
++def sanitize_blocked_field(field: str) -> str:
++    """对 blocked_field 做安全脱敏，移除可能包含的敏感 key 原文。"""
++    if not field:
++        return field
++
++    for marker in _SENSITIVE_FIELD_MARKERS:
++        if marker.lower() in field.lower():
++            # 将 source_evidence 下含敏感 key 的路径替换为安全的 $key 路径
++            parts = field.split(".")
++            safe_parts: list[str] = []
++            for p in parts:
++                if any(m.lower() in p.lower() for m in _SENSITIVE_FIELD_MARKERS):
++                    safe_parts.append("$key")
++                else:
++                    safe_parts.append(p)
++            return ".".join(safe_parts)
++
++    return field
++
++
+ class KnowledgeGovernance:
+     """
+     知识治理核心。
+@@ -116,7 +143,7 @@ class KnowledgeGovernance:
+                     "source_evidence_key_count": len(source_evidence) if source_evidence else 0,
+                     "tag_count": len(tags) if tags else 0,
+                     "blocked_reason": validation.blocked_reason,
+-                    "blocked_field": validation.blocked_field,
++                    "blocked_field": sanitize_blocked_field(validation.blocked_field),
+                     "type": knowledge_type,
+                     "module": module,
+                     "source_type": source_type,
+@@ -144,7 +171,7 @@ class KnowledgeGovernance:
+                     "passed": False,
+                     "blocked": True,
+                     "blocked_reason": validation.blocked_reason,
+-                    "blocked_field": validation.blocked_field,
++                    "blocked_field": sanitize_blocked_field(validation.blocked_field),
+                     "warnings": validation.warnings,
+                 },
+                 "review_decision": {
+diff --git a/src/project_memory_mcp/knowledge/validator.py b/src/project_memory_mcp/knowledge/validator.py
+index 0299d5b..86dac67 100644
+--- a/src/project_memory_mcp/knowledge/validator.py
++++ b/src/project_memory_mcp/knowledge/validator.py
+@@ -225,9 +225,6 @@ class ContentValidator:
+ 
+     # ── 递归扫描 source_evidence ───────────────────────────────────
+ 
+-    # Phase 4.3: key 路径使用 $ 前缀区分（$key vs .value）
+-    KEY_PATH_SEP = "$"
+-
+     def _walk_source_evidence(
+         self, obj, prefix: str
+     ) -> list[tuple[str, str]]:
+@@ -236,16 +233,16 @@ class ContentValidator:
+ 
+         返回 [(field_path, text), ...]。
+         value 路径: source_evidence.nested.raw
+-        key 路径:   source_evidence.$keyName（Phase 4.3 新增）
++        key 路径:   source_evidence.$key（Phase 4.4: 不包含原始 key 文本）
+         list 路径:  source_evidence.items[0].context
+         """
+         results: list[tuple[str, str]] = []
+         if isinstance(obj, dict):
+             for key, value in obj.items():
+                 val_path = f"{prefix}.{key}"
+-                # Phase 4.3: dict key 也参与敏感信息扫描
++                # Phase 4.4: key 路径使用 $key 代替原始 key 文本，防止敏感信息通过 blocked_field 泄露
+                 if isinstance(key, str):
+-                    key_path = f"{prefix}.{self.KEY_PATH_SEP}{key}"
++                    key_path = self._safe_key_path(prefix)
+                     results.append((key_path, key))
+                 if isinstance(value, str):
+                     results.append((val_path, value))
+@@ -259,10 +256,10 @@ class ContentValidator:
+                 if isinstance(item, str):
+                     results.append((idx_path, item))
+                 elif isinstance(item, dict):
+-                    # Phase 4.3: list 内 dict 的 key 也扫描
++                    # Phase 4.4: list 内 dict 的 key 也扫描，使用 $key
+                     for key, value in item.items():
+                         if isinstance(key, str):
+-                            key_path = f"{idx_path}.{self.KEY_PATH_SEP}{key}"
++                            key_path = self._safe_key_path(idx_path)
+                             results.append((key_path, key))
+                         val_path = f"{idx_path}.{key}"
+                         if isinstance(value, str):
+@@ -272,3 +269,8 @@ class ContentValidator:
+                 elif isinstance(item, list):
+                     results.extend(self._walk_source_evidence(item, idx_path))
+         return results
++
++    @staticmethod
++    def _safe_key_path(prefix: str) -> str:
++        """返回安全的 key 路径，不包含原始 key 文本。"""
++        return f"{prefix}.$key"
+diff --git a/tests/test_governance.py b/tests/test_governance.py
+index 3ab38e6..67b0906 100644
+--- a/tests/test_governance.py
++++ b/tests/test_governance.py
+@@ -1006,7 +1006,7 @@ class TestGovernancePropose:
+         )
+         assert result["status"] == "rejected"
+         assert result["validation"]["blocked"] is True
+-        assert "$OPENAI_API_KEY" in result["validation"]["blocked_field"]
++        assert "$key" in result["validation"]["blocked_field"]
+ 
+     def test_51_audit_no_raw_key_text(
+         self, governance, project_repo, project_config, audit_repo,
+@@ -1295,3 +1295,72 @@ class TestGovernanceApproveReject:
+             actor="test",
+         )
+         assert result["status"] in ("approved", "pending_review")
++
++    # ── Phase 4.4: blocked_field 安全 ──
++
++    def test_60_blocked_field_no_raw_key_in_result(
++        self, governance, project_repo, project_config,
++    ):
++        """返回结果的 blocked_field 不含原始 key 文本。"""
++        _seed_project(project_repo, project_config)
++        result = governance.propose_memory(
++            title="安全的标题",
++            content="安全的正文",
++            project=project_config,
++            source_evidence={
++                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
++            },
++            actor="test",
++        )
++        bf = result["validation"]["blocked_field"]
++        assert "OPENAI_API_KEY" not in bf
++        assert "sk-" not in bf
++        assert "$key" in bf
++
++    def test_61_audit_log_blocked_field_no_raw_key(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """audit_log 中的 blocked_field 不含原始 key 文本。"""
++        _seed_project(project_repo, project_config)
++        governance.propose_memory(
++            title="安全的标题",
++            content="安全的正文",
++            project=project_config,
++            source_evidence={
++                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
++            },
++            actor="test",
++        )
++        import json as _json
++        logs = audit_repo.list_by_project_id(project_config.id)
++        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
++        assert len(blocked_logs) >= 1
++        nv = _json.dumps(blocked_logs[0].get("new_value") or {}, ensure_ascii=False)
++        assert "OPENAI_API_KEY" not in nv
++        assert "sk-proj" not in nv
++        assert "$key" in nv
++
++    def test_62_nested_key_audit_safe(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """嵌套 key 命中后 audit_log blocked_field 为 source_evidence.nested.$key。"""
++        _seed_project(project_repo, project_config)
++        governance.propose_memory(
++            title="安全的标题",
++            content="安全的正文",
++            project=project_config,
++            source_evidence={
++                "nested": {
++                    "token=ghp_abcdefghijklmnopqrstuvwxyz": "safe",
++                },
++            },
++            actor="test",
++        )
++        import json as _json
++        logs = audit_repo.list_by_project_id(project_config.id)
++        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
++        assert len(blocked_logs) >= 1
++        nv = _json.dumps(blocked_logs[0].get("new_value") or {}, ensure_ascii=False)
++        assert "token=" not in nv
++        assert "ghp_" not in nv
++        assert "$key" in nv
+diff --git a/tests/test_validator.py b/tests/test_validator.py
+index ea29899..1354a8b 100644
+--- a/tests/test_validator.py
++++ b/tests/test_validator.py
+@@ -388,7 +388,7 @@ class TestPersistedPayload:
+             },
+         )
+         assert result.blocked is True
+-        assert "$OPENAI_API_KEY" in result.blocked_field
++        assert "$key" in result.blocked_field
+ 
+     def test_32_nested_key_with_token_blocked(self, validator):
+         result = validator.validate_persisted_payload(
+@@ -401,7 +401,7 @@ class TestPersistedPayload:
+             },
+         )
+         assert result.blocked is True
+-        assert "$token" in result.blocked_field
++        assert "$key" in result.blocked_field
+         assert "nested" in result.blocked_field
+ 
+     def test_33_list_dict_key_with_password_blocked(self, validator):
+@@ -415,5 +415,52 @@ class TestPersistedPayload:
+             },
+         )
+         assert result.blocked is True
+-        assert "$password" in result.blocked_field
++        assert "$key" in result.blocked_field
+         assert "items[0]" in result.blocked_field
++
++    # ── Phase 4.4: blocked_field 不包含原始敏感 key ──
++
++    def test_34_blocked_field_no_raw_api_key(self, validator):
++        """source_evidence key 含 API key → blocked_field 不含原始 key。"""
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文",
++            source_evidence={
++                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
++            },
++        )
++        assert result.blocked is True
++        assert "OPENAI_API_KEY" not in result.blocked_field
++        assert "sk-" not in result.blocked_field
++        assert "$key" in result.blocked_field
++
++    def test_35_nested_key_safe_path(self, validator):
++        """嵌套 key 的 blocked_field 不包含 token= 原文。"""
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文",
++            source_evidence={
++                "nested": {
++                    "token=ghp_abcdefghijklmnopqrstuvwxyz": "safe",
++                },
++            },
++        )
++        assert result.blocked is True
++        assert "token=" not in result.blocked_field
++        assert "$key" in result.blocked_field
++        assert result.blocked_field == "source_evidence.nested.$key"
++
++    def test_36_list_dict_key_safe_path(self, validator):
++        """list 内 dict key 的 blocked_field 不包含 password= 原文。"""
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文",
++            source_evidence={
++                "items": [
++                    {"password=secret123": "safe"},
++                ],
++            },
++        )
++        assert result.blocked is True
++        assert "password=secret123" not in result.blocked_field
++        assert "$key" in result.blocked_field
