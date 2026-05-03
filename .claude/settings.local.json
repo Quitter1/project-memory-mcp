@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__project-memory-mcp__resolve_project",
+      "mcp__project-memory-mcp__search_project_context",
+      "mcp__project-memory-mcp__propose_memory",
+      "mcp__project-memory-mcp__reject_memory"
+    ]
+  }
+}

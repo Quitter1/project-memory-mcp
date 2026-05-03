@@ -147,7 +147,14 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 7.2 — MCP stdio 客户端补强（缺mcp exit语义/argparse/importorskip/--allow-missing-mcp）。
+当前阶段：阶段 8.2 — 真实使用回路收口（cleanup三组分类/--include-terminal/rejected显示/diagnose一致性）。
+
+## 真实使用规则
+
+- 默认不允许自动 propose_memory，只有用户明确要求"沉淀/保存/记录为知识"时才允许
+- 测试知识必须以 [CC_TEST] 开头
+- 所有写入类操作必须可审计（走 governance）
+- review/cleanup 脚本默认 dry-run，必须 --yes 才真正写库
 
 ## 硬性规则（MCP 层）
 

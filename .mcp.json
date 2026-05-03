@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "project-memory-mcp": {
+      "command": "F:/project/project-memory-mcp/.venv/Scripts/python.exe",
+      "args": ["-m", "project_memory_mcp"],
+      "env": {
+        "PROJECT_MEMORY_CONFIG_DIR": "F:/project/project-memory-mcp/config",
+        "PROJECT_MEMORY_DB_PATH": "F:/project/project-memory-mcp/data/memory.db",
+        "PROJECT_MEMORY_LOG_DIR": "F:/project/project-memory-mcp/logs",
+        "PROJECT_MEMORY_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

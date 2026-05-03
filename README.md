@@ -137,10 +137,22 @@ python -m pytest tests/ -v
   ```
 - 所有日志经过敏感信息 redaction（sk-/token/password 脱敏）
 
+## 真实使用流程
+
+1. 任务开始：`search_project_context`（自动检索）
+2. 任务结束：先列候选，**不自动写入**
+3. 用户确认：`propose_memory`（逐条提交）
+4. 人工审核：`python scripts/review_memories.py list --status pending_review`
+5. 测试清理：`python scripts/cleanup_test_memories.py --dry-run`
+
+详细规范见 `docs/claude-code-memory-workflow.md`
+
 ## 备注
 
 - Qdrant 向量检索尚未启用（keyword search 可用）
 - LLM Reviewer 尚未启用（rule-based reviewer 可用）
+- **AI 默认不允许自动 propose_memory**，必须用户明确要求
+- 测试知识必须以 `[CC_TEST]` 开头
 - `sandbox/test_tool_handler_client.py` 是 ToolHandler 级调试客户端，不是真实 MCP stdio 客户端
 
 ## 许可

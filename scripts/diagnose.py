@@ -83,6 +83,7 @@ def main():
     parser.add_argument("--project", help="指定项目 ID")
     parser.add_argument("--recent-errors", action="store_true", help="显示 errors.log 最后 50 行")
     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
+    parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
     args = parser.parse_args()
 
     config_dir, db_path = _paths.get_project_paths()
@@ -163,6 +164,49 @@ def main():
             conn.close()
         else:
             print("  数据库不存在")
+
+    # 6. review-summary
+    if args.review_summary:
+        print(f"\n[6] 审核摘要")
+        if db_path.exists():
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+
+            rows = conn.execute(
+                "SELECT project_id, COUNT(*) as cnt FROM memory_items "
+                "WHERE status='pending_review' GROUP BY project_id"
+            ).fetchall()
+            print("  待审核知识:")
+            for r in rows:
+                print(f"    {r['project_id']}: {r['cnt']}")
+            if not rows:
+                print("    (无)")
+
+            rows = conn.execute(
+                "SELECT mi.status, COUNT(*) as cnt FROM memory_items mi "
+                "WHERE mi.title LIKE '[CC_TEST]%' OR mi.title LIKE '[STDIO_TEST]%' "
+                "OR (mi.type = 'test' AND mi.module = 'mcp') "
+                "OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = mi.id "
+                "AND mt.tag IN ('CC_TEST', 'STDIO_TEST')) "
+                "GROUP BY mi.status"
+            ).fetchall()
+            print("  测试知识:")
+            for r in rows:
+                print(f"    {r['status']}: {r['cnt']}")
+            if not rows:
+                print("    (无)")
+
+            for s in ("rejected", "deprecated"):
+                cnt = conn.execute("SELECT COUNT(*) FROM memory_items WHERE status=?", (s,)).fetchone()[0]
+                print(f"  {s}: {cnt}")
+
+            cnt = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='blocked'").fetchone()[0]
+            print(f"  blocked: {cnt}")
+            cnt = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='duplicate_rejected'").fetchone()[0]
+            print(f"  duplicate_rejected: {cnt}")
+            conn.close()
 
     print(f"\n{'=' * 50}")
     print("  诊断完成")

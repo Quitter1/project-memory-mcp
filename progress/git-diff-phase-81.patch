@@ -1,0 +1,165 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a3d1cfa..944f512 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,14 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 7.2 — MCP stdio 客户端补强（缺mcp exit语义/argparse/importorskip/--allow-missing-mcp）。
++当前阶段：阶段 8.1 — 真实使用回路收口（diagnose SQL修复/cleanup识别增强/review输出+过滤/脚本测试覆盖）。
++
++## 真实使用规则
++
++- 默认不允许自动 propose_memory，只有用户明确要求"沉淀/保存/记录为知识"时才允许
++- 测试知识必须以 [CC_TEST] 开头
++- 所有写入类操作必须可审计（走 governance）
++- review/cleanup 脚本默认 dry-run，必须 --yes 才真正写库
+ 
+ ## 硬性规则（MCP 层）
+ 
+diff --git a/README.md b/README.md
+index a6af979..11389ce 100644
+--- a/README.md
++++ b/README.md
+@@ -137,10 +137,22 @@ python -m pytest tests/ -v
+   ```
+ - 所有日志经过敏感信息 redaction（sk-/token/password 脱敏）
+ 
++## 真实使用流程
++
++1. 任务开始：`search_project_context`（自动检索）
++2. 任务结束：先列候选，**不自动写入**
++3. 用户确认：`propose_memory`（逐条提交）
++4. 人工审核：`python scripts/review_memories.py list --status pending_review`
++5. 测试清理：`python scripts/cleanup_test_memories.py --dry-run`
++
++详细规范见 `docs/claude-code-memory-workflow.md`
++
+ ## 备注
+ 
+ - Qdrant 向量检索尚未启用（keyword search 可用）
+ - LLM Reviewer 尚未启用（rule-based reviewer 可用）
++- **AI 默认不允许自动 propose_memory**，必须用户明确要求
++- 测试知识必须以 `[CC_TEST]` 开头
+ - `sandbox/test_tool_handler_client.py` 是 ToolHandler 级调试客户端，不是真实 MCP stdio 客户端
+ 
+ ## 许可
+diff --git a/config/projects.yml b/config/projects.yml
+index a191b86..38905ab 100644
+--- a/config/projects.yml
++++ b/config/projects.yml
+@@ -120,34 +120,30 @@ projects:
+   # 示例项目 3：RPA 客户端（Electron 前端项目）
+   # ------------------------------------------------------------------
+   rpa-electron:
+-    name: "RPA 客户端"
++    name: "Electron RPA 自动化"
+     slug: "rpa-electron"
+-    description: "基于 Electron + Vue3 + Playwright 的 RPA 自动化客户端"
+     status: active
+-
+     recognition:
+       root_paths:
+-        - "D:/workspace/rpa-electron"
+-        - "/home/dev/rpa-electron"
+-      path_patterns:
+-        - "**/rpa-electron/**"
+-        - "**/rpa-client/**"
++        - "F:/project/auto_script/rpa-todomvc-demo"
+       aliases:
+-        - "rpa"
+-        - "自动化客户端"
+-        - "rpa客户端"
++        - "rpa-electron"
++        - "rpa-todomvc-demo"
++        - "todomvc"
++        - "电商自动化"
++        - "Electron RPA"
++        - "Playwright"
+       tech_stack_keywords:
+-        - "electron"
+-        - "vue3"
+-        - "typescript"
+-        - "playwright"
+-        - "nodejs"
+-        - "vite"
++        - "Electron"
++        - "Vue3"
++        - "TypeScript"
++        - "Playwright"
++        - "webview"
+       module_keywords:
+-        - "任务录制"
+-        - "脚本执行"
+-        - "元素选择器"
+-        - "浏览器自动化"
++        - "RPA"
++        - "自动化"
++        - "调试面板"
++        - "webview"
+ 
+     knowledge_policy:
+       default_confidence: 0.5
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index d132d55..58910c7 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -83,6 +83,7 @@ def main():
+     parser.add_argument("--project", help="指定项目 ID")
+     parser.add_argument("--recent-errors", action="store_true", help="显示 errors.log 最后 50 行")
+     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
++    parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
+     args = parser.parse_args()
+ 
+     config_dir, db_path = _paths.get_project_paths()
+@@ -164,6 +165,49 @@ def main():
+         else:
+             print("  数据库不存在")
+ 
++    # 6. review-summary
++    if args.review_summary:
++        print(f"\n[6] 审核摘要")
++        if db_path.exists():
++            import sqlite3
++            conn = sqlite3.connect(str(db_path))
++            conn.row_factory = sqlite3.Row
++            conn.execute("PRAGMA foreign_keys = ON")
++
++            rows = conn.execute(
++                "SELECT project_id, COUNT(*) as cnt FROM memory_items "
++                "WHERE status='pending_review' GROUP BY project_id"
++            ).fetchall()
++            print("  待审核知识:")
++            for r in rows:
++                print(f"    {r['project_id']}: {r['cnt']}")
++            if not rows:
++                print("    (无)")
++
++            rows = conn.execute(
++                "SELECT mi.status, COUNT(*) as cnt FROM memory_items mi "
++                "WHERE mi.title LIKE '[CC_TEST]%' OR mi.title LIKE '[STDIO_TEST]%' "
++                "OR (mi.type = 'test' AND mi.module = 'mcp') "
++                "OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = mi.id "
++                "AND mt.tag IN ('CC_TEST', 'STDIO_TEST')) "
++                "GROUP BY mi.status"
++            ).fetchall()
++            print("  测试知识:")
++            for r in rows:
++                print(f"    {r['status']}: {r['cnt']}")
++            if not rows:
++                print("    (无)")
++
++            for s in ("rejected", "deprecated"):
++                cnt = conn.execute("SELECT COUNT(*) FROM memory_items WHERE status=?", (s,)).fetchone()[0]
++                print(f"  {s}: {cnt}")
++
++            cnt = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='blocked'").fetchone()[0]
++            print(f"  blocked: {cnt}")
++            cnt = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='duplicate_rejected'").fetchone()[0]
++            print(f"  duplicate_rejected: {cnt}")
++            conn.close()
++
+     print(f"\n{'=' * 50}")
+     print("  诊断完成")
+     print(f"{'=' * 50}")

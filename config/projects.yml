@@ -120,34 +120,30 @@ projects:
   # 示例项目 3：RPA 客户端（Electron 前端项目）
   # ------------------------------------------------------------------
   rpa-electron:
-    name: "RPA 客户端"
+    name: "Electron RPA 自动化"
     slug: "rpa-electron"
-    description: "基于 Electron + Vue3 + Playwright 的 RPA 自动化客户端"
     status: active
-
     recognition:
       root_paths:
-        - "D:/workspace/rpa-electron"
-        - "/home/dev/rpa-electron"
-      path_patterns:
-        - "**/rpa-electron/**"
-        - "**/rpa-client/**"
+        - "F:/project/auto_script/rpa-todomvc-demo"
       aliases:
-        - "rpa"
-        - "自动化客户端"
-        - "rpa客户端"
+        - "rpa-electron"
+        - "rpa-todomvc-demo"
+        - "todomvc"
+        - "电商自动化"
+        - "Electron RPA"
+        - "Playwright"
       tech_stack_keywords:
-        - "electron"
-        - "vue3"
-        - "typescript"
-        - "playwright"
-        - "nodejs"
-        - "vite"
+        - "Electron"
+        - "Vue3"
+        - "TypeScript"
+        - "Playwright"
+        - "webview"
       module_keywords:
-        - "任务录制"
-        - "脚本执行"
-        - "元素选择器"
-        - "浏览器自动化"
+        - "RPA"
+        - "自动化"
+        - "调试面板"
+        - "webview"
 
     knowledge_policy:
       default_confidence: 0.5
