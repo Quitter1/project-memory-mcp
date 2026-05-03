@@ -1,7 +1,5 @@
 """propose_memory — 提交候选知识，走完整治理流水线。"""
 
-import traceback
-import sys
 from .handlers import make_response, make_error_response, resolve_project_or_error
 
 
@@ -49,9 +47,15 @@ def handle(ctx, params: dict) -> dict:
         )
         return make_response(result)
     except Exception as exc:
-        if "GovernanceError" in type(exc).__name__ or "tags" in str(exc).lower():
-            print(f"[propose_memory] {type(exc).__name__}: {exc}", file=sys.stderr)
-            return make_error_response("invalid_params", str(exc))
-        tb = traceback.format_exc()
-        print(f"[propose_memory] {tb}", file=sys.stderr)
-        return make_error_response("propose_error", str(exc))
+        from ..utils.logging import redact_sensitive
+        import logging
+        name = type(exc).__name__
+        if "GovernanceError" in name or "tags" in str(exc).lower():
+            logging.getLogger("project_memory_mcp").warning(
+                "propose_memory_error exc_type=%s", name,
+            )
+            return make_error_response("invalid_params", redact_sensitive(str(exc)))
+        logging.getLogger("project_memory_mcp").error(
+            "propose_memory_exception exc_type=%s", name,
+        )
+        return make_error_response("internal_error", "工具执行失败，请查看日志")

@@ -52,18 +52,8 @@ class AppContext:
     governance: KnowledgeGovernance = field(init=False)
 
     def __post_init__(self):
-        # 0. 日志初始化（幂等）
-        import os
-        from .utils.logging import setup_logging
-        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
-        if not log_dir:
-            log_dir = self.config_dir.parent / "logs"
-        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL", "INFO")
-        setup_logging(log_dir=Path(log_dir), level=log_level, enable_file=True)
-        logging.getLogger("project_memory_mcp").info(
-            "app_context_start config_dir=%s db_path=%s qdrant_enabled=false llm_reviewer_enabled=false",
-            self.config_dir, self.db_path,
-        )
+        # 0. 日志初始化
+        self._init_logging()
 
         # 1. 数据库连接 + 迁移
         self.db = DatabaseConnection(str(self.db_path))
@@ -104,6 +94,61 @@ class AppContext:
             validator=self.validator,
             deduplicator=self.deduplicator,
             reviewer=self.reviewer,
+        )
+
+        # 7. 启动就绪日志
+        self._log_ready()
+
+    def _init_logging(self):
+        """读取 server.yml + 环境变量初始化日志。"""
+        from .utils.logging import setup_logging
+        import yaml
+
+        server_yml = self.config_dir / "server.yml"
+        cfg: dict = {}
+        if server_yml.exists():
+            try:
+                raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
+                cfg = raw.get("logging", {}) if raw else {}
+            except Exception:
+                cfg = {}
+
+        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
+        if not log_dir:
+            log_dir = cfg.get("log_dir")
+            if log_dir:
+                log_dir = str(self.config_dir.parent / log_dir)
+            else:
+                log_dir = self.config_dir.parent / "logs"
+
+        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL") or cfg.get("level", "INFO")
+        file_enabled = cfg.get("file_enabled", True)
+        stderr_enabled = cfg.get("stderr_enabled", True)
+
+        setup_logging(
+            log_dir=Path(log_dir), level=str(log_level),
+            enable_file=bool(file_enabled), enable_stderr=bool(stderr_enabled),
+            max_bytes=int(cfg.get("max_bytes", 5 * 1024 * 1024)),
+            backup_count=int(cfg.get("backup_count", 5)),
+        )
+        logging.getLogger("project_memory_mcp").info(
+            "app_context_start config_dir=%s db_path=%s", self.config_dir, self.db_path,
+        )
+
+    def _log_ready(self):
+        """记录启动就绪摘要。"""
+        try:
+            uv = self.conn.execute("PRAGMA user_version").fetchone()[0]
+            n_p = self.conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+            n_m = self.conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
+            n_a = self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        except Exception:
+            uv, n_p, n_m, n_a = "?", "?", "?", "?"
+
+        logging.getLogger("project_memory_mcp").info(
+            "app_context_ready user_version=%s project_count=%s memory_count=%s "
+            "audit_log_count=%s qdrant_enabled=false llm_reviewer_enabled=false",
+            uv, n_p, n_m, n_a,
         )
 
     def sync_projects(self) -> int:

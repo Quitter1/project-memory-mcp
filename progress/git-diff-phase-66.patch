@@ -1,0 +1,662 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 11eeb0d..c072e3b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6.4 — 日志接入收口（AppContext初始化日志/redaction/diagnose FK/errors.log/审计）。
++当前阶段：阶段 6.6 — 日志接入收口（移除print(traceback)/异常脱敏/server.yml max_bytes生效/logger.exception禁用/diagnose.yml log_dir）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index 5fe5ef6..d132d55 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -20,10 +20,22 @@ _ = _paths.ensure_import_paths()
+ 
+ 
+ def _get_log_dir(config_dir):
+-    """获取日志目录（与 AppContext 逻辑一致）。"""
++    """获取日志目录（与 AppContext._init_logging 逻辑一致）。"""
+     env = os.environ.get("PROJECT_MEMORY_LOG_DIR")
+     if env:
+         return _paths.Path(env)
++
++    server_yml = config_dir / "server.yml"
++    if server_yml.exists():
++        try:
++            import yaml
++            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
++            log_dir = raw.get("logging", {}).get("log_dir") if raw else None
++            if log_dir:
++                return config_dir.parent / log_dir
++        except Exception:
++            pass
++
+     return config_dir.parent / "logs"
+ 
+ 
+diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
+index d39b899..d1f3d77 100644
+--- a/src/project_memory_mcp/app_context.py
++++ b/src/project_memory_mcp/app_context.py
+@@ -52,18 +52,8 @@ class AppContext:
+     governance: KnowledgeGovernance = field(init=False)
+ 
+     def __post_init__(self):
+-        # 0. 日志初始化（幂等）
+-        import os
+-        from .utils.logging import setup_logging
+-        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
+-        if not log_dir:
+-            log_dir = self.config_dir.parent / "logs"
+-        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL", "INFO")
+-        setup_logging(log_dir=Path(log_dir), level=log_level, enable_file=True)
+-        logging.getLogger("project_memory_mcp").info(
+-            "app_context_start config_dir=%s db_path=%s qdrant_enabled=false llm_reviewer_enabled=false",
+-            self.config_dir, self.db_path,
+-        )
++        # 0. 日志初始化
++        self._init_logging()
+ 
+         # 1. 数据库连接 + 迁移
+         self.db = DatabaseConnection(str(self.db_path))
+@@ -106,6 +96,61 @@ class AppContext:
+             reviewer=self.reviewer,
+         )
+ 
++        # 7. 启动就绪日志
++        self._log_ready()
++
++    def _init_logging(self):
++        """读取 server.yml + 环境变量初始化日志。"""
++        from .utils.logging import setup_logging
++        import yaml
++
++        server_yml = self.config_dir / "server.yml"
++        cfg: dict = {}
++        if server_yml.exists():
++            try:
++                raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
++                cfg = raw.get("logging", {}) if raw else {}
++            except Exception:
++                cfg = {}
++
++        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
++        if not log_dir:
++            log_dir = cfg.get("log_dir")
++            if log_dir:
++                log_dir = str(self.config_dir.parent / log_dir)
++            else:
++                log_dir = self.config_dir.parent / "logs"
++
++        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL") or cfg.get("level", "INFO")
++        file_enabled = cfg.get("file_enabled", True)
++        stderr_enabled = cfg.get("stderr_enabled", True)
++
++        setup_logging(
++            log_dir=Path(log_dir), level=str(log_level),
++            enable_file=bool(file_enabled), enable_stderr=bool(stderr_enabled),
++            max_bytes=int(cfg.get("max_bytes", 5 * 1024 * 1024)),
++            backup_count=int(cfg.get("backup_count", 5)),
++        )
++        logging.getLogger("project_memory_mcp").info(
++            "app_context_start config_dir=%s db_path=%s", self.config_dir, self.db_path,
++        )
++
++    def _log_ready(self):
++        """记录启动就绪摘要。"""
++        try:
++            uv = self.conn.execute("PRAGMA user_version").fetchone()[0]
++            n_p = self.conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
++            n_m = self.conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
++            n_a = self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
++        except Exception:
++            uv, n_p, n_m, n_a = "?", "?", "?", "?"
++
++        logging.getLogger("project_memory_mcp").info(
++            "app_context_ready user_version=%s project_count=%s memory_count=%s "
++            "audit_log_count=%s qdrant_enabled=false llm_reviewer_enabled=false",
++            uv, n_p, n_m, n_a,
++        )
++
+     def sync_projects(self) -> int:
+         """将 projects.yml 同步到 SQLite。返回同步数量。"""
+         result = self.project_manager.sync_from_yaml()
+diff --git a/src/project_memory_mcp/server.py b/src/project_memory_mcp/server.py
+index a2a3a89..65b0d21 100644
+--- a/src/project_memory_mcp/server.py
++++ b/src/project_memory_mcp/server.py
+@@ -11,7 +11,6 @@ MCP Server — 基于 mcp==1.27.0 FastMCP，不手写 JSON-RPC。
+ 
+ import os
+ import sys
+-import traceback
+ from pathlib import Path
+ 
+ # 源码相对 fallback 根目录
+@@ -246,9 +245,11 @@ def main():
+     try:
+         server = create_server()
+         server.run(transport="stdio")
+-    except Exception:
+-        tb = traceback.format_exc()
+-        print(f"[server] {tb}", file=sys.stderr)
++    except Exception as exc:
++        import logging
++        logging.getLogger("project_memory_mcp").critical(
++            "server_fatal exc_type=%s", type(exc).__name__,
++        )
+         raise
+ 
+ 
+diff --git a/src/project_memory_mcp/tools/approve_memory.py b/src/project_memory_mcp/tools/approve_memory.py
+index 4827e5b..d9767d9 100644
+--- a/src/project_memory_mcp/tools/approve_memory.py
++++ b/src/project_memory_mcp/tools/approve_memory.py
+@@ -1,7 +1,5 @@
+ """approve_memory — 审核通过候选知识。"""
+ 
+-import traceback
+-import sys
+ from .handlers import make_response, make_error_response
+ 
+ 
+@@ -19,11 +17,16 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
++        from ..utils.logging import redact_sensitive
++        import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+             code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
+-            print(f"[approve_memory] {name}: {exc}", file=sys.stderr)
+-            return make_error_response(code, str(exc))
+-        tb = traceback.format_exc()
+-        print(f"[approve_memory] {tb}", file=sys.stderr)
+-        return make_error_response("governance_error", str(exc))
++            logging.getLogger("project_memory_mcp").warning(
++                "approve_memory_error exc_type=%s code=%s", name, code,
++            )
++            return make_error_response(code, redact_sensitive(str(exc)))
++        logging.getLogger("project_memory_mcp").error(
++            "approve_memory_exception exc_type=%s", name,
++        )
++        return make_error_response("internal_error", "工具执行失败，请查看日志")
+diff --git a/src/project_memory_mcp/tools/deprecate_memory.py b/src/project_memory_mcp/tools/deprecate_memory.py
+index 1b7b255..3ba7448 100644
+--- a/src/project_memory_mcp/tools/deprecate_memory.py
++++ b/src/project_memory_mcp/tools/deprecate_memory.py
+@@ -1,7 +1,5 @@
+ """deprecate_memory — 废弃已生效知识。"""
+ 
+-import traceback
+-import sys
+ from .handlers import make_response, make_error_response
+ 
+ 
+@@ -18,11 +16,16 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
++        from ..utils.logging import redact_sensitive
++        import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+             code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
+-            print(f"[deprecate_memory] {name}: {exc}", file=sys.stderr)
+-            return make_error_response(code, str(exc))
+-        tb = traceback.format_exc()
+-        print(f"[deprecate_memory] {tb}", file=sys.stderr)
+-        return make_error_response("governance_error", str(exc))
++            logging.getLogger("project_memory_mcp").warning(
++                "deprecate_memory_error exc_type=%s code=%s", name, code,
++            )
++            return make_error_response(code, redact_sensitive(str(exc)))
++        logging.getLogger("project_memory_mcp").error(
++            "deprecate_memory_exception exc_type=%s", name,
++        )
++        return make_error_response("internal_error", "工具执行失败，请查看日志")
+diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
+index fea3540..63bd799 100644
+--- a/src/project_memory_mcp/tools/handlers.py
++++ b/src/project_memory_mcp/tools/handlers.py
+@@ -131,9 +131,9 @@ def raw_resolve(ctx, params: dict) -> tuple:
+             {"suggest_projects": [p.slug for p in ctx.config_loader.list_active_projects()]},
+         )
+     except Exception as exc:
+-        tb = traceback.format_exc()
+-        print(f"[raw_resolve] {tb}", file=sys.stderr)
+-        return None, {}, make_error_response("resolve_error", str(exc))
++        from ..utils.logging import redact_sensitive
++        logger.error("raw_resolve_error exc_type=%s", type(exc).__name__)
++        return None, {}, make_error_response("resolve_error", "项目识别失败，请检查日志", {"exc_type": type(exc).__name__})
+ 
+ 
+ def resolve_project_or_error(ctx, **kwargs):
+@@ -163,10 +163,19 @@ class ToolHandler:
+             mod = importlib.import_module(f".{module_name}", "project_memory_mcp.tools")
+             result = mod.handle(self.ctx, params)
+         except Exception as exc:
++            from ..utils.logging import redact_sensitive
+             duration_ms = (time.monotonic() - t0) * 1000
+-            logger.error("tool_exception request_id=%s tool=%s exc=%s", request_id, tool, exc)
++            logger.error(
++                "tool_exception request_id=%s tool=%s exc_type=%s",
++                request_id, tool, type(exc).__name__,
++            )
+             _log_tool_error(tool, request_id, "internal_error", duration_ms)
+-            return make_error_response("internal_error", str(exc), request_id=request_id)
++            return make_error_response(
++                "internal_error",
++                f"工具执行失败，请查看日志 request_id={request_id}",
++                {"exc_type": type(exc).__name__},
++                request_id=request_id,
++            )
+ 
+         duration_ms = (time.monotonic() - t0) * 1000
+ 
+@@ -202,9 +211,9 @@ class ToolHandler:
+                 "governance_decision request_id=%s project_id=%s source_type=%s "
+                 "scope=%s risk_level=%s decision=%s status=%s",
+                 request_id,
+-                params.get("project_id", "?"),
+-                params.get("source_type", "?"),
+-                params.get("scope", "?"),
++                params.get("project_id", "?") or "?",
++                params.get("source_type") or "ai_inferred",
++                params.get("scope") or "project",
+                 d.get("risk_level", "?"),
+                 decision,
+                 d.get("status", "?"),
+diff --git a/src/project_memory_mcp/tools/propose_memory.py b/src/project_memory_mcp/tools/propose_memory.py
+index ac479d9..3c43bcc 100644
+--- a/src/project_memory_mcp/tools/propose_memory.py
++++ b/src/project_memory_mcp/tools/propose_memory.py
+@@ -1,7 +1,5 @@
+ """propose_memory — 提交候选知识，走完整治理流水线。"""
+ 
+-import traceback
+-import sys
+ from .handlers import make_response, make_error_response, resolve_project_or_error
+ 
+ 
+@@ -49,9 +47,15 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
+-        if "GovernanceError" in type(exc).__name__ or "tags" in str(exc).lower():
+-            print(f"[propose_memory] {type(exc).__name__}: {exc}", file=sys.stderr)
+-            return make_error_response("invalid_params", str(exc))
+-        tb = traceback.format_exc()
+-        print(f"[propose_memory] {tb}", file=sys.stderr)
+-        return make_error_response("propose_error", str(exc))
++        from ..utils.logging import redact_sensitive
++        import logging
++        name = type(exc).__name__
++        if "GovernanceError" in name or "tags" in str(exc).lower():
++            logging.getLogger("project_memory_mcp").warning(
++                "propose_memory_error exc_type=%s", name,
++            )
++            return make_error_response("invalid_params", redact_sensitive(str(exc)))
++        logging.getLogger("project_memory_mcp").error(
++            "propose_memory_exception exc_type=%s", name,
++        )
++        return make_error_response("internal_error", "工具执行失败，请查看日志")
+diff --git a/src/project_memory_mcp/tools/reject_memory.py b/src/project_memory_mcp/tools/reject_memory.py
+index 3f4064c..3909506 100644
+--- a/src/project_memory_mcp/tools/reject_memory.py
++++ b/src/project_memory_mcp/tools/reject_memory.py
+@@ -1,7 +1,5 @@
+ """reject_memory — 审核拒绝候选知识。"""
+ 
+-import traceback
+-import sys
+ from .handlers import make_response, make_error_response
+ 
+ 
+@@ -18,11 +16,16 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
++        from ..utils.logging import redact_sensitive
++        import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+             code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
+-            print(f"[reject_memory] {name}: {exc}", file=sys.stderr)
+-            return make_error_response(code, str(exc))
+-        tb = traceback.format_exc()
+-        print(f"[reject_memory] {tb}", file=sys.stderr)
+-        return make_error_response("governance_error", str(exc))
++            logging.getLogger("project_memory_mcp").warning(
++                "reject_memory_error exc_type=%s code=%s", name, code,
++            )
++            return make_error_response(code, redact_sensitive(str(exc)))
++        logging.getLogger("project_memory_mcp").error(
++            "reject_memory_exception exc_type=%s", name,
++        )
++        return make_error_response("internal_error", "工具执行失败，请查看日志")
+diff --git a/src/project_memory_mcp/tools/search_context.py b/src/project_memory_mcp/tools/search_context.py
+index ccf5731..76f03f3 100644
+--- a/src/project_memory_mcp/tools/search_context.py
++++ b/src/project_memory_mcp/tools/search_context.py
+@@ -1,7 +1,5 @@
+ """search_project_context — 检索项目上下文，返回 context_pack。"""
+ 
+-import traceback
+-import sys
+ from .handlers import make_response, make_error_response, resolve_project_or_error
+ 
+ 
+@@ -52,6 +50,8 @@ def handle(ctx, params: dict) -> dict:
+             "fallback_activated": getattr(result_set, "fallback_activated", False),
+         })
+     except Exception as exc:
+-        tb = traceback.format_exc()
+-        print(f"[search_project_context] {tb}", file=sys.stderr)
+-        return make_error_response("search_error", str(exc))
++        import logging
++        logging.getLogger("project_memory_mcp").error(
++            "search_context_exception exc_type=%s", type(exc).__name__,
++        )
++        return make_error_response("internal_error", "工具执行失败，请查看日志")
+diff --git a/src/project_memory_mcp/utils/logging.py b/src/project_memory_mcp/utils/logging.py
+index 995b274..f319dea 100644
+--- a/src/project_memory_mcp/utils/logging.py
++++ b/src/project_memory_mcp/utils/logging.py
+@@ -1,20 +1,20 @@
+ """
+ 日志配置 — MCP 规范要求日志写 stderr 或文件，不写 stdout。
+ 
+-Phase 6.4: 幂等初始化, redaction, AppContext 自动调用。
++Phase 6.6: 完整配置 key 幂等, max_bytes/backup_count, 禁止 traceback 泄露。
+ """
+ 
++import logging
+ import re
+ import sys
+-import logging
+ import uuid
+ from logging.handlers import RotatingFileHandler
+ from pathlib import Path
+ from typing import Optional
+ 
+-_log_initialized = False
++_current_config: Optional[tuple] = None
+ 
+-# 敏感信息 redaction 模式
++# 敏感信息 redaction
+ _REDACT_PATTERNS: list[tuple[re.Pattern, str]] = [
+     (re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"), "sk-proj-[REDACTED]"),
+     (re.compile(r"sk-svcacct-[A-Za-z0-9_-]{20,}"), "sk-svcacct-[REDACTED]"),
+@@ -24,6 +24,7 @@ _REDACT_PATTERNS: list[tuple[re.Pattern, str]] = [
+     (re.compile(r"OPENAI_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "OPENAI_API_KEY=[REDACTED]"),
+     (re.compile(r"ANTHROPIC_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "ANTHROPIC_API_KEY=[REDACTED]"),
+     (re.compile(r"DEEPSEEK_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "DEEPSEEK_API_KEY=[REDACTED]"),
++    (re.compile(r"secret[_-]?key\s*[=:]\s*\S{10,}", re.IGNORECASE), "secret_key=[REDACTED]"),
+     (re.compile(r"token\s*[=:]\s*\S{10,}", re.IGNORECASE), "token=[REDACTED]"),
+     (re.compile(r"access[_-]?token\s*[=:]\s*\S{10,}", re.IGNORECASE), "access_token=[REDACTED]"),
+     (re.compile(r"bearer\s+\S{10,}", re.IGNORECASE), "bearer [REDACTED]"),
+@@ -35,7 +36,6 @@ _REDACT_PATTERNS: list[tuple[re.Pattern, str]] = [
+ 
+ 
+ def redact_sensitive(text: str) -> str:
+-    """对字符串做敏感信息脱敏，替换 sk-/token/password 等。"""
+     if not text or not isinstance(text, str):
+         return text
+     for pattern, replacement in _REDACT_PATTERNS:
+@@ -44,7 +44,6 @@ def redact_sensitive(text: str) -> str:
+ 
+ 
+ def sanitize_for_log(value: str, max_len: int = 80) -> str:
+-    """截断 + 脱敏。"""
+     if not value:
+         return ""
+     redacted = redact_sensitive(value)
+@@ -61,33 +60,46 @@ def setup_logging(
+     log_dir: Optional[Path] = None,
+     level: str = "INFO",
+     enable_file: bool = True,
++    enable_stderr: bool = True,
++    max_bytes: int = 5 * 1024 * 1024,
++    backup_count: int = 5,
++    force: bool = False,
+ ) -> logging.Logger:
+-    """幂等初始化日志（重复调用不叠加 handler）。"""
+-    global _log_initialized
++    """幂等初始化日志。
++
++    相同配置重复调用不叠加 handler；配置变化自动重配。
++    """
++    global _current_config
+     logger = logging.getLogger("project_memory_mcp")
+ 
+-    if _log_initialized:
++    new_config = (str(log_dir) if log_dir else None, level, enable_file, enable_stderr, max_bytes, backup_count)
++    if not force and _current_config == new_config:
+         return logger
+ 
++    # 清理旧 handler
++    for h in list(logger.handlers):
++        h.close()
++        logger.removeHandler(h)
++    _current_config = None
++
+     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+     formatter = logging.Formatter(
+         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+     )
+ 
+-    # stderr — WARNING+
+-    stderr_h = logging.StreamHandler(sys.stderr)
+-    stderr_h.setLevel(logging.WARNING)
+-    stderr_h.setFormatter(formatter)
+-    logger.addHandler(stderr_h)
++    if enable_stderr:
++        stderr_h = logging.StreamHandler(sys.stderr)
++        stderr_h.setLevel(logging.WARNING)
++        stderr_h.setFormatter(formatter)
++        logger.addHandler(stderr_h)
+ 
+-    # File handlers
+     if enable_file and log_dir:
+         log_dir = Path(log_dir)
+         log_dir.mkdir(parents=True, exist_ok=True)
+ 
+         main_h = RotatingFileHandler(
+             log_dir / "project-memory-mcp.log",
+-            maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
++            maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
+         )
+         main_h.setLevel(logging.DEBUG)
+         main_h.setFormatter(formatter)
+@@ -95,12 +107,12 @@ def setup_logging(
+ 
+         err_h = RotatingFileHandler(
+             log_dir / "errors.log",
+-            maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
++            maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
+         )
+         err_h.setLevel(logging.ERROR)
+         err_h.setFormatter(formatter)
+         logger.addHandler(err_h)
+ 
+-    _log_initialized = True
++    _current_config = new_config
+     logger.info("logging initialized: log_dir=%s, level=%s", log_dir, level)
+     return logger
+diff --git a/tests/test_logging.py b/tests/test_logging.py
+index d597d07..2fb7f27 100644
+--- a/tests/test_logging.py
++++ b/tests/test_logging.py
+@@ -14,7 +14,7 @@ from project_memory_mcp.utils.logging import (
+ 
+ def test_setup_logging_creates_files():
+     import project_memory_mcp.utils.logging as ulog
+-    ulog._log_initialized = False
++    ulog._current_config = None
+ 
+     tmp = Path(tempfile.mkdtemp())
+     log_dir = tmp / "logs"
+@@ -30,7 +30,7 @@ def test_setup_logging_creates_files():
+ 
+ def test_setup_logging_idempotent():
+     import project_memory_mcp.utils.logging as ulog
+-    ulog._log_initialized = False
++    ulog._current_config = None
+ 
+     tmp = Path(tempfile.mkdtemp())
+     log_dir = tmp / "logs"
+@@ -107,7 +107,7 @@ defaults:
+ @pytest.fixture
+ def ctx_with_log():
+     import project_memory_mcp.utils.logging as ulog
+-    ulog._log_initialized = False
++    ulog._current_config = None
+ 
+     tmp = Path(tempfile.mkdtemp())
+     config_dir = tmp / "config"
+@@ -168,3 +168,138 @@ def test_search_query_not_in_log(ctx_with_log):
+     log_content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
+     assert "sk-proj" not in log_content
+     assert "query_length" in log_content
++
++
++# ── Phase 6.5: setup_logging 重配 ────────────────────────────
++
++def test_setup_logging_different_dir_switches():
++    import logging as _logging_
++    import project_memory_mcp.utils.logging as ulog
++    ulog._current_config = None
++
++    tmp_a = Path(tempfile.mkdtemp())
++    tmp_b = Path(tempfile.mkdtemp())
++    log_a = tmp_a / "logs"
++    log_b = tmp_b / "logs"
++
++    ulog.setup_logging(log_dir=log_a, level="INFO")
++    _logging_.getLogger("project_memory_mcp").info("msg in A")
++    assert (log_a / "project-memory-mcp.log").exists()
++
++    ulog.setup_logging(log_dir=log_b, level="INFO")
++    _logging_.getLogger("project_memory_mcp").info("msg in B")
++    assert (log_b / "project-memory-mcp.log").exists()
++
++    # A 不应再收到新日志
++    content_a = (log_a / "project-memory-mcp.log").read_text(encoding="utf-8")
++    assert "msg in B" not in content_a
++
++
++def test_setup_logging_same_dir_no_duplicate():
++    import logging as _logging_
++    import project_memory_mcp.utils.logging as ulog
++    ulog._current_config = None
++
++    tmp = Path(tempfile.mkdtemp())
++    log_dir = tmp / "logs"
++    ulog.setup_logging(log_dir=log_dir, level="INFO")
++    ulog.setup_logging(log_dir=log_dir, level="INFO")
++    _logging_.getLogger("project_memory_mcp").info("once")
++    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
++    assert content.count("once") == 1
++
++
++# ── Phase 6.5: server.yml logging ────────────────────────────
++
++def _write_server_yml(config_dir: Path, extra: str = ""):
++    (config_dir / "server.yml").write_text(f"""\
++server:
++  name: test
++  version: "0.1"
++{extra}
++""", encoding="utf-8")
++
++
++def test_server_yml_logging_config():
++    import project_memory_mcp.utils.logging as ulog
++    ulog._current_config = None
++    import os
++    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
++
++    tmp = Path(tempfile.mkdtemp())
++    config_dir = tmp / "config"
++    _write_projects_yml(config_dir)
++    _write_server_yml(config_dir, """
++logging:
++  level: "DEBUG"
++  log_dir: "custom_logs"
++""")
++    from project_memory_mcp.app_context import AppContext
++    ctx = AppContext(config_dir=config_dir, db_path=tmp / "memory.db")
++    custom_dir = tmp / "custom_logs"
++    assert custom_dir.exists()
++    ctx.db.close()
++
++
++def test_server_yml_file_enabled_false():
++    import project_memory_mcp.utils.logging as ulog
++    ulog._current_config = None
++    import os
++    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
++
++    tmp = Path(tempfile.mkdtemp())
++    config_dir = tmp / "config"
++    _write_projects_yml(config_dir)
++    _write_server_yml(config_dir, """
++logging:
++  file_enabled: false
++""")
++    from project_memory_mcp.app_context import AppContext
++    ctx = AppContext(config_dir=config_dir, db_path=tmp / "memory.db")
++    # 默认 logs/ 不应创建（file_enabled=false）
++    default_logs = tmp / "logs"
++    assert not (default_logs / "project-memory-mcp.log").exists()
++    ctx.db.close()
++
++
++# ── Phase 6.5: app_context_ready ────────────────────────────
++
++def test_app_context_ready_log():
++    import project_memory_mcp.utils.logging as ulog
++    ulog._current_config = None
++    import os
++    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
++
++    tmp = Path(tempfile.mkdtemp())
++    config_dir = tmp / "config"
++    db_path = tmp / "memory.db"
++    log_dir = tmp / "logs"
++    _write_projects_yml(config_dir)
++    os.environ["PROJECT_MEMORY_LOG_DIR"] = str(log_dir)
++    from project_memory_mcp.app_context import AppContext
++    ctx = AppContext(config_dir=config_dir, db_path=db_path)
++    ctx.db.close()
++
++    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
++    assert "app_context_ready" in content
++    assert "user_version=" in content
++    assert "project_count=" in content
++
++
++# ── Phase 6.5: governance_decision defaults ──────────────────
++
++def test_governance_decision_defaults(ctx_with_log):
++    ctx, log_dir = ctx_with_log
++    from project_memory_mcp.tools.handlers import ToolHandler
++    handler = ToolHandler(ctx)
++    handler.propose_memory({
++        "project_id": "test-proj",
++        "title": "test", "content": "safe",
++        # 不传 scope/source_type
++        "actor": "test",
++    })
++    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
++    assert "source_type=ai_inferred" in content
++    assert "scope=project" in content
++    assert "source_type=?" not in content
++    assert "scope=?" not in content

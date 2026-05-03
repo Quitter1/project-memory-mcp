@@ -131,9 +131,9 @@ def raw_resolve(ctx, params: dict) -> tuple:
             {"suggest_projects": [p.slug for p in ctx.config_loader.list_active_projects()]},
         )
     except Exception as exc:
-        tb = traceback.format_exc()
-        print(f"[raw_resolve] {tb}", file=sys.stderr)
-        return None, {}, make_error_response("resolve_error", str(exc))
+        from ..utils.logging import redact_sensitive
+        logger.error("raw_resolve_error exc_type=%s", type(exc).__name__)
+        return None, {}, make_error_response("resolve_error", "项目识别失败，请检查日志", {"exc_type": type(exc).__name__})
 
 
 def resolve_project_or_error(ctx, **kwargs):
@@ -163,10 +163,19 @@ class ToolHandler:
             mod = importlib.import_module(f".{module_name}", "project_memory_mcp.tools")
             result = mod.handle(self.ctx, params)
         except Exception as exc:
+            from ..utils.logging import redact_sensitive
             duration_ms = (time.monotonic() - t0) * 1000
-            logger.error("tool_exception request_id=%s tool=%s exc=%s", request_id, tool, exc)
+            logger.error(
+                "tool_exception request_id=%s tool=%s exc_type=%s",
+                request_id, tool, type(exc).__name__,
+            )
             _log_tool_error(tool, request_id, "internal_error", duration_ms)
-            return make_error_response("internal_error", str(exc), request_id=request_id)
+            return make_error_response(
+                "internal_error",
+                f"工具执行失败，请查看日志 request_id={request_id}",
+                {"exc_type": type(exc).__name__},
+                request_id=request_id,
+            )
 
         duration_ms = (time.monotonic() - t0) * 1000
 
@@ -202,9 +211,9 @@ class ToolHandler:
                 "governance_decision request_id=%s project_id=%s source_type=%s "
                 "scope=%s risk_level=%s decision=%s status=%s",
                 request_id,
-                params.get("project_id", "?"),
-                params.get("source_type", "?"),
-                params.get("scope", "?"),
+                params.get("project_id", "?") or "?",
+                params.get("source_type") or "ai_inferred",
+                params.get("scope") or "project",
                 d.get("risk_level", "?"),
                 decision,
                 d.get("status", "?"),

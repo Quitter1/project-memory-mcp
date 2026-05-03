@@ -14,7 +14,7 @@ from project_memory_mcp.utils.logging import (
 
 def test_setup_logging_creates_files():
     import project_memory_mcp.utils.logging as ulog
-    ulog._log_initialized = False
+    ulog._current_config = None
 
     tmp = Path(tempfile.mkdtemp())
     log_dir = tmp / "logs"
@@ -30,7 +30,7 @@ def test_setup_logging_creates_files():
 
 def test_setup_logging_idempotent():
     import project_memory_mcp.utils.logging as ulog
-    ulog._log_initialized = False
+    ulog._current_config = None
 
     tmp = Path(tempfile.mkdtemp())
     log_dir = tmp / "logs"
@@ -107,7 +107,7 @@ defaults:
 @pytest.fixture
 def ctx_with_log():
     import project_memory_mcp.utils.logging as ulog
-    ulog._log_initialized = False
+    ulog._current_config = None
 
     tmp = Path(tempfile.mkdtemp())
     config_dir = tmp / "config"
@@ -168,3 +168,138 @@ def test_search_query_not_in_log(ctx_with_log):
     log_content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
     assert "sk-proj" not in log_content
     assert "query_length" in log_content
+
+
+# ── Phase 6.5: setup_logging 重配 ────────────────────────────
+
+def test_setup_logging_different_dir_switches():
+    import logging as _logging_
+    import project_memory_mcp.utils.logging as ulog
+    ulog._current_config = None
+
+    tmp_a = Path(tempfile.mkdtemp())
+    tmp_b = Path(tempfile.mkdtemp())
+    log_a = tmp_a / "logs"
+    log_b = tmp_b / "logs"
+
+    ulog.setup_logging(log_dir=log_a, level="INFO")
+    _logging_.getLogger("project_memory_mcp").info("msg in A")
+    assert (log_a / "project-memory-mcp.log").exists()
+
+    ulog.setup_logging(log_dir=log_b, level="INFO")
+    _logging_.getLogger("project_memory_mcp").info("msg in B")
+    assert (log_b / "project-memory-mcp.log").exists()
+
+    # A 不应再收到新日志
+    content_a = (log_a / "project-memory-mcp.log").read_text(encoding="utf-8")
+    assert "msg in B" not in content_a
+
+
+def test_setup_logging_same_dir_no_duplicate():
+    import logging as _logging_
+    import project_memory_mcp.utils.logging as ulog
+    ulog._current_config = None
+
+    tmp = Path(tempfile.mkdtemp())
+    log_dir = tmp / "logs"
+    ulog.setup_logging(log_dir=log_dir, level="INFO")
+    ulog.setup_logging(log_dir=log_dir, level="INFO")
+    _logging_.getLogger("project_memory_mcp").info("once")
+    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
+    assert content.count("once") == 1
+
+
+# ── Phase 6.5: server.yml logging ────────────────────────────
+
+def _write_server_yml(config_dir: Path, extra: str = ""):
+    (config_dir / "server.yml").write_text(f"""\
+server:
+  name: test
+  version: "0.1"
+{extra}
+""", encoding="utf-8")
+
+
+def test_server_yml_logging_config():
+    import project_memory_mcp.utils.logging as ulog
+    ulog._current_config = None
+    import os
+    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
+
+    tmp = Path(tempfile.mkdtemp())
+    config_dir = tmp / "config"
+    _write_projects_yml(config_dir)
+    _write_server_yml(config_dir, """
+logging:
+  level: "DEBUG"
+  log_dir: "custom_logs"
+""")
+    from project_memory_mcp.app_context import AppContext
+    ctx = AppContext(config_dir=config_dir, db_path=tmp / "memory.db")
+    custom_dir = tmp / "custom_logs"
+    assert custom_dir.exists()
+    ctx.db.close()
+
+
+def test_server_yml_file_enabled_false():
+    import project_memory_mcp.utils.logging as ulog
+    ulog._current_config = None
+    import os
+    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
+
+    tmp = Path(tempfile.mkdtemp())
+    config_dir = tmp / "config"
+    _write_projects_yml(config_dir)
+    _write_server_yml(config_dir, """
+logging:
+  file_enabled: false
+""")
+    from project_memory_mcp.app_context import AppContext
+    ctx = AppContext(config_dir=config_dir, db_path=tmp / "memory.db")
+    # 默认 logs/ 不应创建（file_enabled=false）
+    default_logs = tmp / "logs"
+    assert not (default_logs / "project-memory-mcp.log").exists()
+    ctx.db.close()
+
+
+# ── Phase 6.5: app_context_ready ────────────────────────────
+
+def test_app_context_ready_log():
+    import project_memory_mcp.utils.logging as ulog
+    ulog._current_config = None
+    import os
+    os.environ.pop("PROJECT_MEMORY_LOG_DIR", None)
+
+    tmp = Path(tempfile.mkdtemp())
+    config_dir = tmp / "config"
+    db_path = tmp / "memory.db"
+    log_dir = tmp / "logs"
+    _write_projects_yml(config_dir)
+    os.environ["PROJECT_MEMORY_LOG_DIR"] = str(log_dir)
+    from project_memory_mcp.app_context import AppContext
+    ctx = AppContext(config_dir=config_dir, db_path=db_path)
+    ctx.db.close()
+
+    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
+    assert "app_context_ready" in content
+    assert "user_version=" in content
+    assert "project_count=" in content
+
+
+# ── Phase 6.5: governance_decision defaults ──────────────────
+
+def test_governance_decision_defaults(ctx_with_log):
+    ctx, log_dir = ctx_with_log
+    from project_memory_mcp.tools.handlers import ToolHandler
+    handler = ToolHandler(ctx)
+    handler.propose_memory({
+        "project_id": "test-proj",
+        "title": "test", "content": "safe",
+        # 不传 scope/source_type
+        "actor": "test",
+    })
+    content = (log_dir / "project-memory-mcp.log").read_text(encoding="utf-8")
+    assert "source_type=ai_inferred" in content
+    assert "scope=project" in content
+    assert "source_type=?" not in content
+    assert "scope=?" not in content

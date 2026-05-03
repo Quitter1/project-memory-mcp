@@ -20,10 +20,22 @@ _ = _paths.ensure_import_paths()
 
 
 def _get_log_dir(config_dir):
-    """获取日志目录（与 AppContext 逻辑一致）。"""
+    """获取日志目录（与 AppContext._init_logging 逻辑一致）。"""
     env = os.environ.get("PROJECT_MEMORY_LOG_DIR")
     if env:
         return _paths.Path(env)
+
+    server_yml = config_dir / "server.yml"
+    if server_yml.exists():
+        try:
+            import yaml
+            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
+            log_dir = raw.get("logging", {}).get("log_dir") if raw else None
+            if log_dir:
+                return config_dir.parent / log_dir
+        except Exception:
+            pass
+
     return config_dir.parent / "logs"
 
 

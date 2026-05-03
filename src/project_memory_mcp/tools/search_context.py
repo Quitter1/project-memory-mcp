@@ -1,7 +1,5 @@
 """search_project_context — 检索项目上下文，返回 context_pack。"""
 
-import traceback
-import sys
 from .handlers import make_response, make_error_response, resolve_project_or_error
 
 
@@ -52,6 +50,8 @@ def handle(ctx, params: dict) -> dict:
             "fallback_activated": getattr(result_set, "fallback_activated", False),
         })
     except Exception as exc:
-        tb = traceback.format_exc()
-        print(f"[search_project_context] {tb}", file=sys.stderr)
-        return make_error_response("search_error", str(exc))
+        import logging
+        logging.getLogger("project_memory_mcp").error(
+            "search_context_exception exc_type=%s", type(exc).__name__,
+        )
+        return make_error_response("internal_error", "工具执行失败，请查看日志")

@@ -11,7 +11,6 @@ MCP Server — 基于 mcp==1.27.0 FastMCP，不手写 JSON-RPC。
 
 import os
 import sys
-import traceback
 from pathlib import Path
 
 # 源码相对 fallback 根目录
@@ -246,9 +245,11 @@ def main():
     try:
         server = create_server()
         server.run(transport="stdio")
-    except Exception:
-        tb = traceback.format_exc()
-        print(f"[server] {tb}", file=sys.stderr)
+    except Exception as exc:
+        import logging
+        logging.getLogger("project_memory_mcp").critical(
+            "server_fatal exc_type=%s", type(exc).__name__,
+        )
         raise
 
 

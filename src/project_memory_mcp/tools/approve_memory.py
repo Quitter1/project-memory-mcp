@@ -1,7 +1,5 @@
 """approve_memory — 审核通过候选知识。"""
 
-import traceback
-import sys
 from .handlers import make_response, make_error_response
 
 
@@ -19,11 +17,16 @@ def handle(ctx, params: dict) -> dict:
         )
         return make_response(result)
     except Exception as exc:
+        from ..utils.logging import redact_sensitive
+        import logging
         name = type(exc).__name__
         if "GovernanceError" in name:
             code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
-            print(f"[approve_memory] {name}: {exc}", file=sys.stderr)
-            return make_error_response(code, str(exc))
-        tb = traceback.format_exc()
-        print(f"[approve_memory] {tb}", file=sys.stderr)
-        return make_error_response("governance_error", str(exc))
+            logging.getLogger("project_memory_mcp").warning(
+                "approve_memory_error exc_type=%s code=%s", name, code,
+            )
+            return make_error_response(code, redact_sensitive(str(exc)))
+        logging.getLogger("project_memory_mcp").error(
+            "approve_memory_exception exc_type=%s", name,
+        )
+        return make_error_response("internal_error", "工具执行失败，请查看日志")

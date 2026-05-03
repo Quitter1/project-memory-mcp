@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 6.4 — 日志接入收口（AppContext初始化日志/redaction/diagnose FK/errors.log/审计）。
+当前阶段：阶段 6.6 — 日志接入收口（移除print(traceback)/异常脱敏/server.yml max_bytes生效/logger.exception禁用/diagnose.yml log_dir）。
 
 ### changed_files 路径规则
 
