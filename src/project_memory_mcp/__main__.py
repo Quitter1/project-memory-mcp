@@ -1,11 +1,10 @@
-"""入口：python -m project_memory_mcp"""
+"""入口：python -m project_memory_mcp — 启动 MCP stdio server。"""
 
 
 def main():
     """启动 MCP server。"""
-    from .server import create_and_run_server
-
-    create_and_run_server()
+    from .server import main as server_main
+    server_main()
 
 
 if __name__ == "__main__":

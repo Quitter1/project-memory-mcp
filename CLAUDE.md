@@ -144,7 +144,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 4.4 — 知识治理安全收口（blocked_field 脱敏/audit_log 安全化/$key 安全路径）。
+当前阶段：阶段 5 — MCP 工具实现（9 tools + server.py + AppContext + ToolHandler + 集成测试）。
 
 ### changed_files 路径规则
 
