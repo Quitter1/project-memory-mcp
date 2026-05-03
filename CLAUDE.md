@@ -147,7 +147,13 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 6.6 — 日志接入收口（移除print(traceback)/异常脱敏/server.yml max_bytes生效/logger.exception禁用/diagnose.yml log_dir）。
+当前阶段：阶段 6.7 — 日志接入收口（server fatal sys.exit/工具层稳定错误消息/静态检查/no_raw_traceback）。
+
+## 后续路线
+
+- Phase 7：真实 MCP stdio / Claude Code 接入验证
+- Phase 8：Qdrant + embedding
+- Phase 9：DSV4P / LLM Reviewer
 
 ### changed_files 路径规则
 

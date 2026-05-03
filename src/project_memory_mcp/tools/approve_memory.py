@@ -2,6 +2,13 @@
 
 from .handlers import make_response, make_error_response
 
+STABLE_MESSAGES = {
+    "memory_not_found": "知识不存在",
+    "invalid_state": "当前知识状态不允许执行该操作",
+    "invalid_params": "参数错误",
+    "governance_error": "知识治理操作失败",
+}
+
 
 def handle(ctx, params: dict) -> dict:
     memory_id = params.get("memory_id", "")
@@ -17,7 +24,6 @@ def handle(ctx, params: dict) -> dict:
         )
         return make_response(result)
     except Exception as exc:
-        from ..utils.logging import redact_sensitive
         import logging
         name = type(exc).__name__
         if "GovernanceError" in name:
@@ -25,7 +31,7 @@ def handle(ctx, params: dict) -> dict:
             logging.getLogger("project_memory_mcp").warning(
                 "approve_memory_error exc_type=%s code=%s", name, code,
             )
-            return make_error_response(code, redact_sensitive(str(exc)))
+            return make_error_response(code, STABLE_MESSAGES.get(code, "操作失败"))
         logging.getLogger("project_memory_mcp").error(
             "approve_memory_exception exc_type=%s", name,
         )

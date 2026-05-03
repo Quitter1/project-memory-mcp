@@ -2,6 +2,11 @@
 
 from .handlers import make_response, make_error_response, resolve_project_or_error
 
+STABLE_MESSAGES = {
+    "invalid_params": "参数错误",
+    "internal_error": "工具执行失败，请查看日志",
+}
+
 
 def handle(ctx, params: dict) -> dict:
     project_id = params.get("project_id")
@@ -47,15 +52,14 @@ def handle(ctx, params: dict) -> dict:
         )
         return make_response(result)
     except Exception as exc:
-        from ..utils.logging import redact_sensitive
         import logging
         name = type(exc).__name__
         if "GovernanceError" in name or "tags" in str(exc).lower():
             logging.getLogger("project_memory_mcp").warning(
                 "propose_memory_error exc_type=%s", name,
             )
-            return make_error_response("invalid_params", redact_sensitive(str(exc)))
+            return make_error_response("invalid_params", STABLE_MESSAGES.get("invalid_params", "参数错误"))
         logging.getLogger("project_memory_mcp").error(
             "propose_memory_exception exc_type=%s", name,
         )
-        return make_error_response("internal_error", "工具执行失败，请查看日志")
+        return make_error_response("internal_error", STABLE_MESSAGES.get("internal_error", "工具执行失败"))

@@ -1,0 +1,175 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index c072e3b..a314b8f 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,13 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6.6 — 日志接入收口（移除print(traceback)/异常脱敏/server.yml max_bytes生效/logger.exception禁用/diagnose.yml log_dir）。
++当前阶段：阶段 6.7 — 日志接入收口（server fatal sys.exit/工具层稳定错误消息/静态检查/no_raw_traceback）。
++
++## 后续路线
++
++- Phase 7：真实 MCP stdio / Claude Code 接入验证
++- Phase 8：Qdrant + embedding
++- Phase 9：DSV4P / LLM Reviewer
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/src/project_memory_mcp/server.py b/src/project_memory_mcp/server.py
+index 65b0d21..d99f62a 100644
+--- a/src/project_memory_mcp/server.py
++++ b/src/project_memory_mcp/server.py
+@@ -247,10 +247,11 @@ def main():
+         server.run(transport="stdio")
+     except Exception as exc:
+         import logging
++        import sys as _sys
+         logging.getLogger("project_memory_mcp").critical(
+             "server_fatal exc_type=%s", type(exc).__name__,
+         )
+-        raise
++        _sys.exit(1)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/src/project_memory_mcp/tools/approve_memory.py b/src/project_memory_mcp/tools/approve_memory.py
+index d9767d9..0882b77 100644
+--- a/src/project_memory_mcp/tools/approve_memory.py
++++ b/src/project_memory_mcp/tools/approve_memory.py
+@@ -2,6 +2,13 @@
+ 
+ from .handlers import make_response, make_error_response
+ 
++STABLE_MESSAGES = {
++    "memory_not_found": "知识不存在",
++    "invalid_state": "当前知识状态不允许执行该操作",
++    "invalid_params": "参数错误",
++    "governance_error": "知识治理操作失败",
++}
++
+ 
+ def handle(ctx, params: dict) -> dict:
+     memory_id = params.get("memory_id", "")
+@@ -17,7 +24,6 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
+-        from ..utils.logging import redact_sensitive
+         import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+@@ -25,7 +31,7 @@ def handle(ctx, params: dict) -> dict:
+             logging.getLogger("project_memory_mcp").warning(
+                 "approve_memory_error exc_type=%s code=%s", name, code,
+             )
+-            return make_error_response(code, redact_sensitive(str(exc)))
++            return make_error_response(code, STABLE_MESSAGES.get(code, "操作失败"))
+         logging.getLogger("project_memory_mcp").error(
+             "approve_memory_exception exc_type=%s", name,
+         )
+diff --git a/src/project_memory_mcp/tools/deprecate_memory.py b/src/project_memory_mcp/tools/deprecate_memory.py
+index 3ba7448..cc84663 100644
+--- a/src/project_memory_mcp/tools/deprecate_memory.py
++++ b/src/project_memory_mcp/tools/deprecate_memory.py
+@@ -2,6 +2,13 @@
+ 
+ from .handlers import make_response, make_error_response
+ 
++STABLE_MESSAGES = {
++    "memory_not_found": "知识不存在",
++    "invalid_state": "当前知识状态不允许执行该操作",
++    "invalid_params": "参数错误",
++    "governance_error": "知识治理操作失败",
++}
++
+ 
+ def handle(ctx, params: dict) -> dict:
+     memory_id = params.get("memory_id", "")
+@@ -16,7 +23,6 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
+-        from ..utils.logging import redact_sensitive
+         import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+@@ -24,7 +30,7 @@ def handle(ctx, params: dict) -> dict:
+             logging.getLogger("project_memory_mcp").warning(
+                 "deprecate_memory_error exc_type=%s code=%s", name, code,
+             )
+-            return make_error_response(code, redact_sensitive(str(exc)))
++            return make_error_response(code, STABLE_MESSAGES.get(code, "操作失败"))
+         logging.getLogger("project_memory_mcp").error(
+             "deprecate_memory_exception exc_type=%s", name,
+         )
+diff --git a/src/project_memory_mcp/tools/propose_memory.py b/src/project_memory_mcp/tools/propose_memory.py
+index 3c43bcc..cbd102d 100644
+--- a/src/project_memory_mcp/tools/propose_memory.py
++++ b/src/project_memory_mcp/tools/propose_memory.py
+@@ -2,6 +2,11 @@
+ 
+ from .handlers import make_response, make_error_response, resolve_project_or_error
+ 
++STABLE_MESSAGES = {
++    "invalid_params": "参数错误",
++    "internal_error": "工具执行失败，请查看日志",
++}
++
+ 
+ def handle(ctx, params: dict) -> dict:
+     project_id = params.get("project_id")
+@@ -47,15 +52,14 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
+-        from ..utils.logging import redact_sensitive
+         import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name or "tags" in str(exc).lower():
+             logging.getLogger("project_memory_mcp").warning(
+                 "propose_memory_error exc_type=%s", name,
+             )
+-            return make_error_response("invalid_params", redact_sensitive(str(exc)))
++            return make_error_response("invalid_params", STABLE_MESSAGES.get("invalid_params", "参数错误"))
+         logging.getLogger("project_memory_mcp").error(
+             "propose_memory_exception exc_type=%s", name,
+         )
+-        return make_error_response("internal_error", "工具执行失败，请查看日志")
++        return make_error_response("internal_error", STABLE_MESSAGES.get("internal_error", "工具执行失败"))
+diff --git a/src/project_memory_mcp/tools/reject_memory.py b/src/project_memory_mcp/tools/reject_memory.py
+index 3909506..6a3c128 100644
+--- a/src/project_memory_mcp/tools/reject_memory.py
++++ b/src/project_memory_mcp/tools/reject_memory.py
+@@ -2,6 +2,13 @@
+ 
+ from .handlers import make_response, make_error_response
+ 
++STABLE_MESSAGES = {
++    "memory_not_found": "知识不存在",
++    "invalid_state": "当前知识状态不允许执行该操作",
++    "invalid_params": "参数错误",
++    "governance_error": "知识治理操作失败",
++}
++
+ 
+ def handle(ctx, params: dict) -> dict:
+     memory_id = params.get("memory_id", "")
+@@ -16,7 +23,6 @@ def handle(ctx, params: dict) -> dict:
+         )
+         return make_response(result)
+     except Exception as exc:
+-        from ..utils.logging import redact_sensitive
+         import logging
+         name = type(exc).__name__
+         if "GovernanceError" in name:
+@@ -24,7 +30,7 @@ def handle(ctx, params: dict) -> dict:
+             logging.getLogger("project_memory_mcp").warning(
+                 "reject_memory_error exc_type=%s code=%s", name, code,
+             )
+-            return make_error_response(code, redact_sensitive(str(exc)))
++            return make_error_response(code, STABLE_MESSAGES.get(code, "操作失败"))
+         logging.getLogger("project_memory_mcp").error(
+             "reject_memory_exception exc_type=%s", name,
+         )

@@ -247,10 +247,11 @@ def main():
         server.run(transport="stdio")
     except Exception as exc:
         import logging
+        import sys as _sys
         logging.getLogger("project_memory_mcp").critical(
             "server_fatal exc_type=%s", type(exc).__name__,
         )
-        raise
+        _sys.exit(1)
 
 
 if __name__ == "__main__":
