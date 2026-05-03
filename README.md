@@ -97,6 +97,14 @@ python scripts/run_demo_flow.py
 
 # 5. 全量测试
 python -m pytest tests/ -v
+
+# 如果本机 pytest 插件较多，脚本 subprocess 测试可能卡住，可用：
+# Linux/macOS:
+#   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v
+# Windows PowerShell:
+#   $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"
+#   python -m pytest tests/ -v
+#   Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD
 ```
 
 ## 备注

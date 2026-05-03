@@ -75,6 +75,9 @@
 2. 普通日志应写 stderr 或文件。
 3. **MCP server 必须基于 MCP Python SDK / FastMCP 实现**，不要手写 JSON-RPC 协议层。
 4. server.py 只做工具注册、参数校验和业务分发。
+5. **任何新增日志都必须经过敏感信息脱敏**，不得记录 API key/sk-/password/token 原文。
+6. **MCP stdio server 不允许使用 print 输出普通日志**。
+7. **新增工具必须返回 request_id**（格式 req_xxxxxxxx）。
 
 ### 多项目隔离约束
 
@@ -144,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 6 — 端到端集成测试（多项目隔离/安全闭环/MCP 格式/demo 数据/dev_check）。
+当前阶段：阶段 6.3 — 脚本+日志收口（_paths与server同源/run_demo退出码/request_id/工具日志/诊断脚本）。
 
 ### changed_files 路径规则
 

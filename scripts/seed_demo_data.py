@@ -3,13 +3,16 @@
 
 使用：
     python scripts/seed_demo_data.py
+
+环境变量：
+    PROJECT_MEMORY_CONFIG_DIR — 配置目录
+    PROJECT_MEMORY_DB_PATH — 数据库路径
 """
 
 import sys
-from pathlib import Path
 
-_src = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(_src))
+import _paths
+_ = _paths.ensure_import_paths()
 
 from project_memory_mcp.app_context import AppContext
 from project_memory_mcp.models.memory_item import MemoryItem
@@ -69,7 +72,7 @@ DEMO_DATA = [
         "tags": ["Electron", "webview", "RPA"],
         "source_type": "user_confirmed",
     },
-    # ── global (绑定 img-vector-search 但 scope=global) ──
+    # ── global ───────────────────────────────────────
     {
         "project_id": "img-vector-search",
         "title": "MySQL 1267 collation 错误排查",
@@ -95,8 +98,9 @@ DEMO_DATA = [
 ]
 
 
-def _existing_hash_set(ctx):
-    hashes = set()
+def _existing_key_set(ctx):
+    """返回已存在的 (project_id, scope, content_hash) 集合。"""
+    keys = set()
     for d in DEMO_DATA:
         h = compute_content_hash(d["content"])
         existing = ctx.memory_repo.find_by_hash(
@@ -104,19 +108,26 @@ def _existing_hash_set(ctx):
             active_statuses={"approved", "pending_review", "candidate", "conflict"},
         )
         if existing is not None:
-            hashes.add(h)
-    return hashes
+            keys.add((d["project_id"], d["scope"], h))
+    return keys
 
 
 def seed(ctx: AppContext) -> dict:
     ctx.sync_projects()
-    existing_hashes = _existing_hash_set(ctx)
+    existing_keys = _existing_key_set(ctx)
     created = 0
     skipped = 0
+    missing_proj = 0
 
     for d in DEMO_DATA:
+        # 跳过不存在的项目
+        if ctx.config_loader.get_project(d["project_id"]) is None:
+            missing_proj += 1
+            continue
+
         h = compute_content_hash(d["content"])
-        if h in existing_hashes:
+        k = (d["project_id"], d["scope"], h)
+        if k in existing_keys:
             skipped += 1
             continue
 
@@ -138,20 +149,29 @@ def seed(ctx: AppContext) -> dict:
         )
         ctx.memory_repo.create_memory(item, actor="seed_demo_data", reason="演示数据填充")
         created += 1
-        existing_hashes.add(h)
+        existing_keys.add(k)
 
-    return {"created": created, "skipped": skipped, "total": len(DEMO_DATA)}
+    return {"created": created, "skipped": skipped, "missing_project": missing_proj, "total": len(DEMO_DATA)}
 
 
 def main():
-    config_dir = Path(__file__).parent.parent / "config"
-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
+    allow_missing = "--allow-missing-projects" in sys.argv
+    config_dir, db_path = _paths.get_project_paths()
     ctx = AppContext(config_dir=config_dir, db_path=db_path)
     result = seed(ctx)
-    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']}, 总计 {result['total']}")
+    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']},"
+          f" 缺失项目 {result['missing_project']}, 总计 {result['total']}")
     ctx.db.close()
+
+    # 全部缺失且未允许 → exit 1
+    if result["missing_project"] > 0 and result["created"] + result["skipped"] == 0:
+        if allow_missing:
+            print("警告: 部分 demo 项目不在配置中，已允许跳过")
+        else:
+            print("错误: 所有 demo 数据项目均不在当前配置中。")
+            print("  请确认 config/projects.yml 包含 biaopai-erp/cdr-converter/rpa-electron/img-vector-search")
+            print("  或使用 --allow-missing-projects 跳过")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

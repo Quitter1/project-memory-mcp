@@ -1,23 +1,65 @@
-"""工具路由 + 参数校验 + 统一错误处理 + resolve helper。"""
+"""工具路由 + 参数校验 + 统一错误处理 + resolve helper。
 
+Phase 6.3: 所有响应包含 request_id，tool 调用写入日志。
+"""
+
+import time
 import traceback
 import sys
+import logging
 from typing import Optional
 
 from ..project.resolver import ResolveRequest
+from ..utils.logging import new_request_id
+
+logger = logging.getLogger("project_memory_mcp")
 
 
 # ── 统一返回格式 ──────────────────────────────────────────────
 
-def make_response(data: dict) -> dict:
-    return {"ok": True, "data": data}
+def make_response(data: dict, request_id: str = "") -> dict:
+    result = {"ok": True, "request_id": request_id, "data": data} if request_id else {"ok": True, "data": data}
+    return result
 
 
-def make_error_response(code: str, message: str, details: dict | None = None) -> dict:
-    return {
-        "ok": False,
-        "error": {"code": code, "message": message, "details": details or {}},
-    }
+def make_error_response(code: str, message: str, details: dict | None = None, request_id: str = "") -> dict:
+    error = {"code": code, "message": message, "details": details or {}}
+    result = {"ok": False, "request_id": request_id, "error": error} if request_id else {"ok": False, "error": error}
+    return result
+
+
+def _safe_param_summary(params: dict) -> str:
+    """生成安全的参数摘要（不含敏感原文）。"""
+    parts = []
+    for key in ("project_id", "query", "type", "module", "scope", "source_type", "status_filter"):
+        if key in params and params[key]:
+            val = str(params[key])
+            parts.append(f"{key}={val[:40]}")
+    if "tags" in params and params["tags"]:
+        parts.append(f"tag_count={len(params['tags'])}")
+    if "content" in params:
+        parts.append(f"content_length={len(str(params.get('content', '')))}")
+    if "changed_files" in params:
+        cf = params["changed_files"]
+        parts.append(f"changed_files_count={len(cf) if cf else 0}")
+    if "source_evidence" in params and params["source_evidence"]:
+        parts.append("source_evidence_present=1")
+    return ", ".join(parts)
+
+
+def _log_tool_start(tool: str, request_id: str, params: dict):
+    summary = _safe_param_summary(params)
+    logger.info("tool_start request_id=%s tool=%s %s", request_id, tool, summary)
+
+
+def _log_tool_success(tool: str, request_id: str, duration_ms: float, extra: str = ""):
+    logger.info("tool_success request_id=%s tool=%s duration_ms=%.1f %s",
+                request_id, tool, duration_ms, extra)
+
+
+def _log_tool_error(tool: str, request_id: str, code: str, duration_ms: float):
+    logger.warning("tool_error request_id=%s tool=%s code=%s duration_ms=%.1f",
+                   request_id, tool, code, duration_ms)
 
 
 # ── resolve helper ──────────────────────────────────────────────
@@ -93,43 +135,96 @@ def resolve_project_or_error(ctx, **kwargs):
 # ── ToolHandler ─────────────────────────────────────────────────
 
 class ToolHandler:
-    """MCP 工具处理分发器，委托到各 tools/*.py 的 handle() 函数。"""
+    """MCP 工具处理分发器，委托到各 tools/*.py 的 handle() 函数。
+
+    Phase 6.3: 自动注入 request_id 到所有响应，记录工具调用日志。
+    """
 
     def __init__(self, ctx):
         self.ctx = ctx
 
+    def _dispatch(self, tool: str, module_name: str, params: dict) -> dict:
+        request_id = new_request_id()
+        _log_tool_start(tool, request_id, params)
+        t0 = time.monotonic()
+
+        try:
+            import importlib
+            mod = importlib.import_module(f".{module_name}", "project_memory_mcp.tools")
+            result = mod.handle(self.ctx, params)
+        except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            logger.error("tool_exception request_id=%s tool=%s exc=%s", request_id, tool, exc)
+            _log_tool_error(tool, request_id, "internal_error", duration_ms)
+            return make_error_response("internal_error", str(exc), request_id=request_id)
+
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        # 注入 request_id
+        if result.get("ok"):
+            result["request_id"] = request_id
+            _log_tool_success(tool, request_id, duration_ms)
+        else:
+            result["request_id"] = request_id
+            code = result.get("error", {}).get("code", "unknown")
+            _log_tool_error(tool, request_id, code, duration_ms)
+
+        # 搜索诊断日志
+        if tool == "search_project_context" and result.get("ok"):
+            d = result.get("data", {})
+            cp = d.get("context_pack", {})
+            extra = (
+                f"total_found={d.get('total_found', 0)} "
+                f"total_returned={d.get('total_returned', 0)} "
+                f"project_count={len(cp.get('project_context', []))} "
+                f"shared_count={len(cp.get('shared_context', []))} "
+                f"global_count={len(cp.get('global_context', []))} "
+            )
+            logger.info("search_summary request_id=%s %s", request_id, extra.strip())
+
+        # 治理决策日志
+        if tool == "propose_memory" and result.get("ok"):
+            d = result.get("data", {})
+            decision = "approved" if d.get("review_decision", {}).get("auto_approved") else "pending_review"
+            if d.get("status") == "rejected":
+                decision = "rejected"
+            logger.info(
+                "governance_decision request_id=%s project_id=%s source_type=%s "
+                "scope=%s risk_level=%s decision=%s status=%s",
+                request_id,
+                params.get("project_id", "?"),
+                params.get("source_type", "?"),
+                params.get("scope", "?"),
+                d.get("risk_level", "?"),
+                decision,
+                d.get("status", "?"),
+            )
+
+        return result
+
     def list_projects(self, params: dict) -> dict:
-        from .list_projects import handle
-        return handle(self.ctx, params)
+        return self._dispatch("list_projects", "list_projects", params)
 
     def resolve_project(self, params: dict) -> dict:
-        from .resolve_project import handle
-        return handle(self.ctx, params)
+        return self._dispatch("resolve_project", "resolve_project", params)
 
     def get_project_profile(self, params: dict) -> dict:
-        from .get_project_profile import handle
-        return handle(self.ctx, params)
+        return self._dispatch("get_project_profile", "get_project_profile", params)
 
     def search_project_context(self, params: dict) -> dict:
-        from .search_context import handle
-        return handle(self.ctx, params)
+        return self._dispatch("search_project_context", "search_context", params)
 
     def propose_memory(self, params: dict) -> dict:
-        from .propose_memory import handle
-        return handle(self.ctx, params)
+        return self._dispatch("propose_memory", "propose_memory", params)
 
     def list_memories(self, params: dict) -> dict:
-        from .list_memories import handle
-        return handle(self.ctx, params)
+        return self._dispatch("list_memories", "list_memories", params)
 
     def approve_memory(self, params: dict) -> dict:
-        from .approve_memory import handle
-        return handle(self.ctx, params)
+        return self._dispatch("approve_memory", "approve_memory", params)
 
     def reject_memory(self, params: dict) -> dict:
-        from .reject_memory import handle
-        return handle(self.ctx, params)
+        return self._dispatch("reject_memory", "reject_memory", params)
 
     def deprecate_memory(self, params: dict) -> dict:
-        from .deprecate_memory import handle
-        return handle(self.ctx, params)
+        return self._dispatch("deprecate_memory", "deprecate_memory", params)

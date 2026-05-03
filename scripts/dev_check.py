@@ -1,19 +1,25 @@
 """
 开发环境健康检查。
 
-检查项：Python版本、目录、配置文件、数据库、服务初始化。
-
 使用：
     python scripts/dev_check.py
-    # exit code 0 = 一切正常, 非0 = 有问题
+
+环境变量：
+    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
+
+exit code 0 = 一切正常, 非0 = 有问题
 """
 
-import os
 import sys
 import sqlite3
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).parent.parent
+import _paths
+_ = _paths.ensure_import_paths()
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 _exit_code = 0
 
 
@@ -34,7 +40,7 @@ def check_python():
     if v >= (3, 10):
         _ok("Python >= 3.10")
     else:
-        _fail(f"需要 Python >= 3.10，当前 {v.major}.{v.minor}")
+        _fail(f"需要 Python >= 3.10, 当前 {v.major}.{v.minor}")
 
 
 def check_dirs():
@@ -47,34 +53,49 @@ def check_dirs():
             _fail(f"{d} 目录不存在")
 
 
-def check_config():
+def check_config(config_dir: Path):
     print("\n3. 配置文件")
-    yml = _PROJECT_ROOT / "config" / "projects.yml"
+    yml = config_dir / "projects.yml"
     if yml.exists():
         _ok(f"projects.yml ({yml.stat().st_size} bytes)")
     else:
-        _fail("config/projects.yml 不存在")
+        _fail(f"projects.yml 不存在: {yml}")
 
 
-def check_db():
+def check_db(db_path: Path):
     print("\n4. SQLite 数据库")
-    db = _PROJECT_ROOT / "data" / "memory.db"
-    if not db.exists():
-        _fail("data/memory.db 不存在（请先 python scripts/init_db.py）")
+    if not db_path.exists():
+        _fail(f"memory.db 不存在: {db_path}（请先 python scripts/init_db.py）")
         return
 
-    _ok(f"memory.db ({db.stat().st_size} bytes)")
-    conn = sqlite3.connect(str(db))
+    _ok(f"memory.db ({db_path.stat().st_size} bytes)")
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
 
     r = conn.execute("PRAGMA user_version").fetchone()
-    print(f"   user_version = {r[0]}")
+    uv = r[0]
+    print(f"   user_version = {uv}")
+    if uv >= 2:
+        _ok("user_version >= 2")
+    else:
+        _fail(f"user_version = {uv}, 期望 >= 2")
 
     r = conn.execute("PRAGMA journal_mode").fetchone()
-    print(f"   journal_mode = {r[0]}")
+    jm = r[0]
+    print(f"   journal_mode = {jm}")
+    if jm == "wal":
+        _ok("journal_mode = wal")
+    else:
+        _fail(f"journal_mode = {jm}, 期望 wal")
 
     r = conn.execute("PRAGMA foreign_keys").fetchone()
-    print(f"   foreign_keys = {r[0]}")
+    fk = r[0]
+    print(f"   foreign_keys = {fk}")
+    if fk == 1:
+        _ok("foreign_keys = ON")
+    else:
+        _fail(f"foreign_keys = {fk}, 期望 1")
 
     n_projects = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
     print(f"   projects = {n_projects}")
@@ -88,27 +109,22 @@ def check_db():
     conn.close()
 
 
-def check_config_loader():
+def check_config_loader(config_dir: Path):
     print("\n5. ConfigLoader")
-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     try:
         from project_memory_mcp.config.loader import ConfigLoader
-        cl = ConfigLoader(str(_PROJECT_ROOT / "config"))
+        cl = ConfigLoader(str(config_dir))
         projects = cl.load_all_projects()
         _ok(f"加载了 {len(projects)} 个项目")
     except Exception as e:
         _fail(f"ConfigLoader 失败: {e}")
 
 
-def check_app_context():
+def check_app_context(config_dir: Path, db_path: Path):
     print("\n6. AppContext")
-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     try:
         from project_memory_mcp.app_context import AppContext
-        ctx = AppContext(
-            config_dir=_PROJECT_ROOT / "config",
-            db_path=_PROJECT_ROOT / "data" / "memory.db",
-        )
+        ctx = AppContext(config_dir=config_dir, db_path=db_path)
         _ok("AppContext 初始化成功")
         ctx.db.close()
     except Exception as e:
@@ -116,15 +132,17 @@ def check_app_context():
 
 
 def main():
+    config_dir, db_path = _paths.get_project_paths()
+
     print("=" * 50)
     print("  Project Memory MCP — 开发环境健康检查")
     print("=" * 50)
     check_python()
     check_dirs()
-    check_config()
-    check_db()
-    check_config_loader()
-    check_app_context()
+    check_config(config_dir)
+    check_db(db_path)
+    check_config_loader(config_dir)
+    check_app_context(config_dir, db_path)
     print(f"\n{'=' * 50}")
     if _exit_code == 0:
         print("  全部检查通过")

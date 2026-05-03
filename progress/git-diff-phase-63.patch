@@ -1,0 +1,824 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d384382..cbdfaa6 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -75,6 +75,9 @@
+ 2. 普通日志应写 stderr 或文件。
+ 3. **MCP server 必须基于 MCP Python SDK / FastMCP 实现**，不要手写 JSON-RPC 协议层。
+ 4. server.py 只做工具注册、参数校验和业务分发。
++5. **任何新增日志都必须经过敏感信息脱敏**，不得记录 API key/sk-/password/token 原文。
++6. **MCP stdio server 不允许使用 print 输出普通日志**。
++7. **新增工具必须返回 request_id**（格式 req_xxxxxxxx）。
+ 
+ ### 多项目隔离约束
+ 
+@@ -144,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6 — 端到端集成测试（多项目隔离/安全闭环/MCP 格式/demo 数据/dev_check）。
++当前阶段：阶段 6.3 — 脚本+日志收口（_paths与server同源/run_demo退出码/request_id/工具日志/诊断脚本）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/README.md b/README.md
+index cbed503..cd51c32 100644
+--- a/README.md
++++ b/README.md
+@@ -97,6 +97,14 @@ python scripts/run_demo_flow.py
+ 
+ # 5. 全量测试
+ python -m pytest tests/ -v
++
++# 如果本机 pytest 插件较多，脚本 subprocess 测试可能卡住，可用：
++# Linux/macOS:
++#   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v
++# Windows PowerShell:
++#   $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"
++#   python -m pytest tests/ -v
++#   Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD
+ ```
+ 
+ ## 备注
+diff --git a/config/server.yml b/config/server.yml
+index 3c01926..97a1b86 100644
+--- a/config/server.yml
++++ b/config/server.yml
+@@ -8,6 +8,16 @@ server:
+   log_level: "INFO"
+   log_file: "data/logs/mcp-server.log"
+ 
++# 运行期日志
++logging:
++  level: "INFO"
++  log_dir: "logs"
++  file_enabled: true
++  stderr_enabled: true
++  max_bytes: 5242880
++  backup_count: 5
++  redact_sensitive: true
++
+ # 数据库
+ database:
+   path: "data/memory.db"
+diff --git a/scripts/dev_check.py b/scripts/dev_check.py
+index 04acdb2..31d57ae 100644
+--- a/scripts/dev_check.py
++++ b/scripts/dev_check.py
+@@ -1,19 +1,25 @@
+ """
+ 开发环境健康检查。
+ 
+-检查项：Python版本、目录、配置文件、数据库、服务初始化。
+-
+ 使用：
+     python scripts/dev_check.py
+-    # exit code 0 = 一切正常, 非0 = 有问题
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
++
++exit code 0 = 一切正常, 非0 = 有问题
+ """
+ 
+-import os
+ import sys
+ import sqlite3
+ from pathlib import Path
+ 
+-_PROJECT_ROOT = Path(__file__).parent.parent
++import _paths
++_ = _paths.ensure_import_paths()
++
++_PROJECT_ROOT = Path(__file__).resolve().parent.parent
++
++
+ _exit_code = 0
+ 
+ 
+@@ -34,7 +40,7 @@ def check_python():
+     if v >= (3, 10):
+         _ok("Python >= 3.10")
+     else:
+-        _fail(f"需要 Python >= 3.10，当前 {v.major}.{v.minor}")
++        _fail(f"需要 Python >= 3.10, 当前 {v.major}.{v.minor}")
+ 
+ 
+ def check_dirs():
+@@ -47,34 +53,49 @@ def check_dirs():
+             _fail(f"{d} 目录不存在")
+ 
+ 
+-def check_config():
++def check_config(config_dir: Path):
+     print("\n3. 配置文件")
+-    yml = _PROJECT_ROOT / "config" / "projects.yml"
++    yml = config_dir / "projects.yml"
+     if yml.exists():
+         _ok(f"projects.yml ({yml.stat().st_size} bytes)")
+     else:
+-        _fail("config/projects.yml 不存在")
++        _fail(f"projects.yml 不存在: {yml}")
+ 
+ 
+-def check_db():
++def check_db(db_path: Path):
+     print("\n4. SQLite 数据库")
+-    db = _PROJECT_ROOT / "data" / "memory.db"
+-    if not db.exists():
+-        _fail("data/memory.db 不存在（请先 python scripts/init_db.py）")
++    if not db_path.exists():
++        _fail(f"memory.db 不存在: {db_path}（请先 python scripts/init_db.py）")
+         return
+ 
+-    _ok(f"memory.db ({db.stat().st_size} bytes)")
+-    conn = sqlite3.connect(str(db))
++    _ok(f"memory.db ({db_path.stat().st_size} bytes)")
++    conn = sqlite3.connect(str(db_path))
+     conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
+ 
+     r = conn.execute("PRAGMA user_version").fetchone()
+-    print(f"   user_version = {r[0]}")
++    uv = r[0]
++    print(f"   user_version = {uv}")
++    if uv >= 2:
++        _ok("user_version >= 2")
++    else:
++        _fail(f"user_version = {uv}, 期望 >= 2")
+ 
+     r = conn.execute("PRAGMA journal_mode").fetchone()
+-    print(f"   journal_mode = {r[0]}")
++    jm = r[0]
++    print(f"   journal_mode = {jm}")
++    if jm == "wal":
++        _ok("journal_mode = wal")
++    else:
++        _fail(f"journal_mode = {jm}, 期望 wal")
+ 
+     r = conn.execute("PRAGMA foreign_keys").fetchone()
+-    print(f"   foreign_keys = {r[0]}")
++    fk = r[0]
++    print(f"   foreign_keys = {fk}")
++    if fk == 1:
++        _ok("foreign_keys = ON")
++    else:
++        _fail(f"foreign_keys = {fk}, 期望 1")
+ 
+     n_projects = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+     print(f"   projects = {n_projects}")
+@@ -88,27 +109,22 @@ def check_db():
+     conn.close()
+ 
+ 
+-def check_config_loader():
++def check_config_loader(config_dir: Path):
+     print("\n5. ConfigLoader")
+-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+     try:
+         from project_memory_mcp.config.loader import ConfigLoader
+-        cl = ConfigLoader(str(_PROJECT_ROOT / "config"))
++        cl = ConfigLoader(str(config_dir))
+         projects = cl.load_all_projects()
+         _ok(f"加载了 {len(projects)} 个项目")
+     except Exception as e:
+         _fail(f"ConfigLoader 失败: {e}")
+ 
+ 
+-def check_app_context():
++def check_app_context(config_dir: Path, db_path: Path):
+     print("\n6. AppContext")
+-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+     try:
+         from project_memory_mcp.app_context import AppContext
+-        ctx = AppContext(
+-            config_dir=_PROJECT_ROOT / "config",
+-            db_path=_PROJECT_ROOT / "data" / "memory.db",
+-        )
++        ctx = AppContext(config_dir=config_dir, db_path=db_path)
+         _ok("AppContext 初始化成功")
+         ctx.db.close()
+     except Exception as e:
+@@ -116,15 +132,17 @@ def check_app_context():
+ 
+ 
+ def main():
++    config_dir, db_path = _paths.get_project_paths()
++
+     print("=" * 50)
+     print("  Project Memory MCP — 开发环境健康检查")
+     print("=" * 50)
+     check_python()
+     check_dirs()
+-    check_config()
+-    check_db()
+-    check_config_loader()
+-    check_app_context()
++    check_config(config_dir)
++    check_db(db_path)
++    check_config_loader(config_dir)
++    check_app_context(config_dir, db_path)
+     print(f"\n{'=' * 50}")
+     if _exit_code == 0:
+         print("  全部检查通过")
+diff --git a/scripts/run_demo_flow.py b/scripts/run_demo_flow.py
+index cd15f70..c9ca667 100644
+--- a/scripts/run_demo_flow.py
++++ b/scripts/run_demo_flow.py
+@@ -3,14 +3,18 @@
+ 
+ 使用：
+     python scripts/run_demo_flow.py
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
++
++exit 0 = 全部关键步骤通过, exit 1 = 有失败
+ """
+ 
+ import json
+ import sys
+-from pathlib import Path
+ 
+-_src = Path(__file__).parent.parent / "src"
+-sys.path.insert(0, str(_src))
++import _paths
++_ = _paths.ensure_import_paths()
+ 
+ from project_memory_mcp.app_context import AppContext
+ from project_memory_mcp.tools.handlers import ToolHandler
+@@ -24,38 +28,43 @@ def _print(title: str, result: dict):
+     print(json.dumps(result, ensure_ascii=False, indent=2))
+ 
+ 
+-def main():
+-    config_dir = Path(__file__).parent.parent / "config"
+-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
+-    db_path.parent.mkdir(parents=True, exist_ok=True)
++def _check(title: str, result: dict, failures: list, ok_required=True):
++    _print(title, result)
++    if ok_required and not result.get("ok"):
++        failures.append(f"{title}: ok=false, error={result.get('error', {}).get('code', 'unknown')}")
+ 
++
++def main():
++    config_dir, db_path = _paths.get_project_paths()
+     ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     ctx.sync_projects()
+     handler = ToolHandler(ctx)
++    failures: list[str] = []
+ 
+-    # 1. 填充演示数据（幂等）
++    # 1. 填充演示数据
+     seed_result = seed(ctx)
+-    print(f"演示数据: 新增 {seed_result['created']}, 跳过 {seed_result['skipped']}")
++    print(f"演示数据: 新增 {seed_result['created']}, 跳过 {seed_result['skipped']},"
++          f" 缺失项目 {seed_result.get('missing_project', 0)}")
+ 
+     # 2. list_projects
+-    _print("2. list_projects", handler.list_projects({}))
++    _check("2. list_projects", handler.list_projects({}), failures)
+ 
+-    # 3. search ERP 项目
+-    _print("3. search ERP: 产品 材料", handler.search_project_context({
++    # 3. search ERP
++    _check("3. search ERP: 产品 材料", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "产品 材料",
+-    }))
++    }), failures)
+ 
+-    # 4. search CDR 项目
+-    _print("4. search CDR: CorelDRAW 弹窗", handler.search_project_context({
++    # 4. search CDR
++    _check("4. search CDR: CorelDRAW 弹窗", handler.search_project_context({
+         "project_id": "cdr-converter", "query": "CorelDRAW 弹窗",
+-    }))
++    }), failures)
+ 
+-    # 5. search global (MySQL collation)
+-    _print("5. search ERP: collation 1267 (global)", handler.search_project_context({
++    # 5. search global
++    _check("5. search: collation 1267 (global)", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "collation 1267",
+-    }))
++    }), failures)
+ 
+-    # 6. propose 普通知识
++    # 6. propose
+     pr = handler.propose_memory({
+         "project_id": "biaopai-erp",
+         "title": "ERP 订单模块需要加事务注解",
+@@ -66,24 +75,26 @@ def main():
+         "source_type": "ai_inferred",
+         "actor": "demo-flow",
+     })
+-    _print("6. propose_memory(普通)", pr)
+-    mid = pr["data"].get("memory_id", "")
++    _check("6. propose_memory(普通)", pr, failures)
++    mid = ""
++    if pr.get("ok") and pr.get("data"):
++        mid = pr["data"].get("memory_id", "")
+ 
+-    # 7. list pending_review
+-    _print("7. list_memories(pending_review)", handler.list_memories({
++    # 7. list pending
++    _check("7. list_memories(pending_review)", handler.list_memories({
+         "project_id": "biaopai-erp", "status_filter": "pending_review",
+-    }))
++    }), failures)
+ 
+     # 8. approve
+     if mid:
+-        _print("8. approve_memory", handler.approve_memory({
++        _check("8. approve_memory", handler.approve_memory({
+             "memory_id": mid, "reviewer": "demo", "comment": "确认正确",
+-        }))
++        }), failures)
+ 
+-    # 9. re-search — should find approved
+-    _print("9. re-search: 订单 事务", handler.search_project_context({
++    # 9. re-search
++    _check("9. re-search: 订单 事务", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "订单 事务",
+-    }))
++    }), failures)
+ 
+     # 10. propose blocked
+     br = handler.propose_memory({
+@@ -92,17 +103,28 @@ def main():
+         "content": "-----BEGIN RSA PRIVATE KEY-----\ntest",
+         "actor": "demo-flow",
+     })
++    # blocked 返回 ok=true + status=rejected，不算失败
+     _print("10. propose_memory(blocked)", br)
++    if br.get("ok") and br.get("data", {}).get("status") != "rejected":
++        failures.append("10. propose_memory(blocked): 预期 rejected, 实际未 blocked")
+ 
+     # 11. resolve
+-    _print("11. resolve_project(workspace)", handler.resolve_project({
++    _check("11. resolve_project(workspace)", handler.resolve_project({
+         "workspace_path": "D:/workspace/biaopai-erp",
+-    }))
++    }), failures)
+ 
+     ctx.db.close()
++
+     print(f"\n{'=' * 50}")
+-    print("  演示流程完成")
+-    print(f"{'=' * 50}")
++    if failures:
++        print(f"  演示流程失败 ({len(failures)} 项)")
++        for f in failures:
++            print(f"    - {f}")
++        print(f"{'=' * 50}")
++        sys.exit(1)
++    else:
++        print("  演示流程完成")
++        print(f"{'=' * 50}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/seed_demo_data.py b/scripts/seed_demo_data.py
+index db268e9..8fa9802 100644
+--- a/scripts/seed_demo_data.py
++++ b/scripts/seed_demo_data.py
+@@ -3,13 +3,16 @@
+ 
+ 使用：
+     python scripts/seed_demo_data.py
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR — 配置目录
++    PROJECT_MEMORY_DB_PATH — 数据库路径
+ """
+ 
+ import sys
+-from pathlib import Path
+ 
+-_src = Path(__file__).parent.parent / "src"
+-sys.path.insert(0, str(_src))
++import _paths
++_ = _paths.ensure_import_paths()
+ 
+ from project_memory_mcp.app_context import AppContext
+ from project_memory_mcp.models.memory_item import MemoryItem
+@@ -69,7 +72,7 @@ DEMO_DATA = [
+         "tags": ["Electron", "webview", "RPA"],
+         "source_type": "user_confirmed",
+     },
+-    # ── global (绑定 img-vector-search 但 scope=global) ──
++    # ── global ───────────────────────────────────────
+     {
+         "project_id": "img-vector-search",
+         "title": "MySQL 1267 collation 错误排查",
+@@ -95,8 +98,9 @@ DEMO_DATA = [
+ ]
+ 
+ 
+-def _existing_hash_set(ctx):
+-    hashes = set()
++def _existing_key_set(ctx):
++    """返回已存在的 (project_id, scope, content_hash) 集合。"""
++    keys = set()
+     for d in DEMO_DATA:
+         h = compute_content_hash(d["content"])
+         existing = ctx.memory_repo.find_by_hash(
+@@ -104,19 +108,26 @@ def _existing_hash_set(ctx):
+             active_statuses={"approved", "pending_review", "candidate", "conflict"},
+         )
+         if existing is not None:
+-            hashes.add(h)
+-    return hashes
++            keys.add((d["project_id"], d["scope"], h))
++    return keys
+ 
+ 
+ def seed(ctx: AppContext) -> dict:
+     ctx.sync_projects()
+-    existing_hashes = _existing_hash_set(ctx)
++    existing_keys = _existing_key_set(ctx)
+     created = 0
+     skipped = 0
++    missing_proj = 0
+ 
+     for d in DEMO_DATA:
++        # 跳过不存在的项目
++        if ctx.config_loader.get_project(d["project_id"]) is None:
++            missing_proj += 1
++            continue
++
+         h = compute_content_hash(d["content"])
+-        if h in existing_hashes:
++        k = (d["project_id"], d["scope"], h)
++        if k in existing_keys:
+             skipped += 1
+             continue
+ 
+@@ -138,21 +149,30 @@ def seed(ctx: AppContext) -> dict:
+         )
+         ctx.memory_repo.create_memory(item, actor="seed_demo_data", reason="演示数据填充")
+         created += 1
+-        existing_hashes.add(h)
++        existing_keys.add(k)
+ 
+-    return {"created": created, "skipped": skipped, "total": len(DEMO_DATA)}
++    return {"created": created, "skipped": skipped, "missing_project": missing_proj, "total": len(DEMO_DATA)}
+ 
+ 
+ def main():
+-    config_dir = Path(__file__).parent.parent / "config"
+-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
+-    db_path.parent.mkdir(parents=True, exist_ok=True)
+-
++    allow_missing = "--allow-missing-projects" in sys.argv
++    config_dir, db_path = _paths.get_project_paths()
+     ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     result = seed(ctx)
+-    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']}, 总计 {result['total']}")
++    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']},"
++          f" 缺失项目 {result['missing_project']}, 总计 {result['total']}")
+     ctx.db.close()
+ 
++    # 全部缺失且未允许 → exit 1
++    if result["missing_project"] > 0 and result["created"] + result["skipped"] == 0:
++        if allow_missing:
++            print("警告: 部分 demo 项目不在配置中，已允许跳过")
++        else:
++            print("错误: 所有 demo 数据项目均不在当前配置中。")
++            print("  请确认 config/projects.yml 包含 biaopai-erp/cdr-converter/rpa-electron/img-vector-search")
++            print("  或使用 --allow-missing-projects 跳过")
++            sys.exit(1)
++
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
+index c4e75fa..b753f5f 100644
+--- a/src/project_memory_mcp/tools/handlers.py
++++ b/src/project_memory_mcp/tools/handlers.py
+@@ -1,23 +1,65 @@
+-"""工具路由 + 参数校验 + 统一错误处理 + resolve helper。"""
++"""工具路由 + 参数校验 + 统一错误处理 + resolve helper。
+ 
++Phase 6.3: 所有响应包含 request_id，tool 调用写入日志。
++"""
++
++import time
+ import traceback
+ import sys
++import logging
+ from typing import Optional
+ 
+ from ..project.resolver import ResolveRequest
++from ..utils.logging import new_request_id
++
++logger = logging.getLogger("project_memory_mcp")
+ 
+ 
+ # ── 统一返回格式 ──────────────────────────────────────────────
+ 
+-def make_response(data: dict) -> dict:
+-    return {"ok": True, "data": data}
++def make_response(data: dict, request_id: str = "") -> dict:
++    result = {"ok": True, "request_id": request_id, "data": data} if request_id else {"ok": True, "data": data}
++    return result
++
++
++def make_error_response(code: str, message: str, details: dict | None = None, request_id: str = "") -> dict:
++    error = {"code": code, "message": message, "details": details or {}}
++    result = {"ok": False, "request_id": request_id, "error": error} if request_id else {"ok": False, "error": error}
++    return result
++
++
++def _safe_param_summary(params: dict) -> str:
++    """生成安全的参数摘要（不含敏感原文）。"""
++    parts = []
++    for key in ("project_id", "query", "type", "module", "scope", "source_type", "status_filter"):
++        if key in params and params[key]:
++            val = str(params[key])
++            parts.append(f"{key}={val[:40]}")
++    if "tags" in params and params["tags"]:
++        parts.append(f"tag_count={len(params['tags'])}")
++    if "content" in params:
++        parts.append(f"content_length={len(str(params.get('content', '')))}")
++    if "changed_files" in params:
++        cf = params["changed_files"]
++        parts.append(f"changed_files_count={len(cf) if cf else 0}")
++    if "source_evidence" in params and params["source_evidence"]:
++        parts.append("source_evidence_present=1")
++    return ", ".join(parts)
++
++
++def _log_tool_start(tool: str, request_id: str, params: dict):
++    summary = _safe_param_summary(params)
++    logger.info("tool_start request_id=%s tool=%s %s", request_id, tool, summary)
+ 
+ 
+-def make_error_response(code: str, message: str, details: dict | None = None) -> dict:
+-    return {
+-        "ok": False,
+-        "error": {"code": code, "message": message, "details": details or {}},
+-    }
++def _log_tool_success(tool: str, request_id: str, duration_ms: float, extra: str = ""):
++    logger.info("tool_success request_id=%s tool=%s duration_ms=%.1f %s",
++                request_id, tool, duration_ms, extra)
++
++
++def _log_tool_error(tool: str, request_id: str, code: str, duration_ms: float):
++    logger.warning("tool_error request_id=%s tool=%s code=%s duration_ms=%.1f",
++                   request_id, tool, code, duration_ms)
+ 
+ 
+ # ── resolve helper ──────────────────────────────────────────────
+@@ -93,43 +135,96 @@ def resolve_project_or_error(ctx, **kwargs):
+ # ── ToolHandler ─────────────────────────────────────────────────
+ 
+ class ToolHandler:
+-    """MCP 工具处理分发器，委托到各 tools/*.py 的 handle() 函数。"""
++    """MCP 工具处理分发器，委托到各 tools/*.py 的 handle() 函数。
++
++    Phase 6.3: 自动注入 request_id 到所有响应，记录工具调用日志。
++    """
+ 
+     def __init__(self, ctx):
+         self.ctx = ctx
+ 
++    def _dispatch(self, tool: str, module_name: str, params: dict) -> dict:
++        request_id = new_request_id()
++        _log_tool_start(tool, request_id, params)
++        t0 = time.monotonic()
++
++        try:
++            import importlib
++            mod = importlib.import_module(f".{module_name}", "project_memory_mcp.tools")
++            result = mod.handle(self.ctx, params)
++        except Exception as exc:
++            duration_ms = (time.monotonic() - t0) * 1000
++            logger.error("tool_exception request_id=%s tool=%s exc=%s", request_id, tool, exc)
++            _log_tool_error(tool, request_id, "internal_error", duration_ms)
++            return make_error_response("internal_error", str(exc), request_id=request_id)
++
++        duration_ms = (time.monotonic() - t0) * 1000
++
++        # 注入 request_id
++        if result.get("ok"):
++            result["request_id"] = request_id
++            _log_tool_success(tool, request_id, duration_ms)
++        else:
++            result["request_id"] = request_id
++            code = result.get("error", {}).get("code", "unknown")
++            _log_tool_error(tool, request_id, code, duration_ms)
++
++        # 搜索诊断日志
++        if tool == "search_project_context" and result.get("ok"):
++            d = result.get("data", {})
++            cp = d.get("context_pack", {})
++            extra = (
++                f"total_found={d.get('total_found', 0)} "
++                f"total_returned={d.get('total_returned', 0)} "
++                f"project_count={len(cp.get('project_context', []))} "
++                f"shared_count={len(cp.get('shared_context', []))} "
++                f"global_count={len(cp.get('global_context', []))} "
++            )
++            logger.info("search_summary request_id=%s %s", request_id, extra.strip())
++
++        # 治理决策日志
++        if tool == "propose_memory" and result.get("ok"):
++            d = result.get("data", {})
++            decision = "approved" if d.get("review_decision", {}).get("auto_approved") else "pending_review"
++            if d.get("status") == "rejected":
++                decision = "rejected"
++            logger.info(
++                "governance_decision request_id=%s project_id=%s source_type=%s "
++                "scope=%s risk_level=%s decision=%s status=%s",
++                request_id,
++                params.get("project_id", "?"),
++                params.get("source_type", "?"),
++                params.get("scope", "?"),
++                d.get("risk_level", "?"),
++                decision,
++                d.get("status", "?"),
++            )
++
++        return result
++
+     def list_projects(self, params: dict) -> dict:
+-        from .list_projects import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("list_projects", "list_projects", params)
+ 
+     def resolve_project(self, params: dict) -> dict:
+-        from .resolve_project import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("resolve_project", "resolve_project", params)
+ 
+     def get_project_profile(self, params: dict) -> dict:
+-        from .get_project_profile import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("get_project_profile", "get_project_profile", params)
+ 
+     def search_project_context(self, params: dict) -> dict:
+-        from .search_context import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("search_project_context", "search_context", params)
+ 
+     def propose_memory(self, params: dict) -> dict:
+-        from .propose_memory import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("propose_memory", "propose_memory", params)
+ 
+     def list_memories(self, params: dict) -> dict:
+-        from .list_memories import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("list_memories", "list_memories", params)
+ 
+     def approve_memory(self, params: dict) -> dict:
+-        from .approve_memory import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("approve_memory", "approve_memory", params)
+ 
+     def reject_memory(self, params: dict) -> dict:
+-        from .reject_memory import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("reject_memory", "reject_memory", params)
+ 
+     def deprecate_memory(self, params: dict) -> dict:
+-        from .deprecate_memory import handle
+-        return handle(self.ctx, params)
++        return self._dispatch("deprecate_memory", "deprecate_memory", params)
+diff --git a/src/project_memory_mcp/utils/logging.py b/src/project_memory_mcp/utils/logging.py
+index 167e5cf..fffb74c 100644
+--- a/src/project_memory_mcp/utils/logging.py
++++ b/src/project_memory_mcp/utils/logging.py
+@@ -1,33 +1,79 @@
+-"""日志配置 — MCP 规范要求日志写 stderr 或文件，不写 stdout。"""
++"""
++日志配置 — MCP 规范要求日志写 stderr 或文件，不写 stdout。
++
++Phase 6.3: RotatingFileHandler, request_id, 诊断日志。
++"""
+ 
+ import sys
+ import logging
++import uuid
++from logging.handlers import RotatingFileHandler
++from pathlib import Path
++from typing import Optional
+ 
+ 
+-def setup_logging(level: str = "INFO", log_file: str | None = None) -> logging.Logger:
++def setup_logging(
++    log_dir: Optional[Path] = None,
++    level: str = "INFO",
++    enable_file: bool = True,
++) -> logging.Logger:
+     """
+     配置日志系统。
+-    - stderr handler：MCP 规范（stdout 由 JSON-RPC 独占）
+-    - file handler：持久化日志（可选）
++
++    - stderr handler: MCP 规范（stdout 由 JSON-RPC 独占）
++    - 主日志文件: project-memory-mcp.log (RotatingFileHandler, 5MB x 5)
++    - 错误日志: errors.log (只记录 ERROR+)
+     """
+     logger = logging.getLogger("project_memory_mcp")
+-    logger.setLevel(getattr(logging, level.upper()))
+-
+-    # stderr handler
+-    stderr_handler = logging.StreamHandler(sys.stderr)
+-    stderr_handler.setLevel(logging.WARNING)  # stderr 只输出 WARNING+
+-    stderr_fmt = logging.Formatter("[%(levelname)s] %(name)s: %(message)s")
+-    stderr_handler.setFormatter(stderr_fmt)
+-    logger.addHandler(stderr_handler)
+-
+-    # File handler
+-    if log_file:
+-        from pathlib import Path
+-        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+-        file_handler.setLevel(logging.DEBUG)
+-        file_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+-        file_handler.setFormatter(file_fmt)
+-        logger.addHandler(file_handler)
++    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
++
++    formatter = logging.Formatter(
++        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
++    )
++
++    # stderr handler — 仅 WARNING+
++    stderr_h = logging.StreamHandler(sys.stderr)
++    stderr_h.setLevel(logging.WARNING)
++    stderr_h.setFormatter(formatter)
++    logger.addHandler(stderr_h)
++
++    # File handlers
++    if enable_file and log_dir:
++        log_dir = Path(log_dir)
++        log_dir.mkdir(parents=True, exist_ok=True)
++
++        # 主日志
++        main_h = RotatingFileHandler(
++            log_dir / "project-memory-mcp.log",
++            maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
++        )
++        main_h.setLevel(logging.DEBUG)
++        main_h.setFormatter(formatter)
++        logger.addHandler(main_h)
++
++        # 错误日志
++        err_h = RotatingFileHandler(
++            log_dir / "errors.log",
++            maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
++        )
++        err_h.setLevel(logging.ERROR)
++        err_h.setFormatter(formatter)
++        logger.addHandler(err_h)
++
++        logger.info("logging initialized: log_dir=%s, level=%s", log_dir, level)
+ 
+     return logger
++
++
++def new_request_id() -> str:
++    """生成短 request_id：req_ + UUID 前8位。"""
++    return f"req_{uuid.uuid4().hex[:8]}"
++
++
++def sanitize_for_log(value: str, max_len: int = 80) -> str:
++    """截断字符串，用于日志安全记录。"""
++    if not value:
++        return ""
++    if len(value) <= max_len:
++        return value
++    return value[:max_len] + "..."
+diff --git a/tests/test_mcp_tools.py b/tests/test_mcp_tools.py
+index d50b363..385b443 100644
+--- a/tests/test_mcp_tools.py
++++ b/tests/test_mcp_tools.py
+@@ -313,3 +313,25 @@ def test_make_error_response():
+     assert r["error"]["code"] == "code123"
+     assert r["error"]["message"] == "message"
+     assert r["error"]["details"] == {"detail": "x"}
++
++
++def test_request_id_in_all_responses(handler):
++    """所有 tool 成功和失败响应都包含 request_id。"""
++    # 成功
++    r1 = handler.list_projects({"status_filter": "active"})
++    assert "request_id" in r1
++    assert r1["request_id"].startswith("req_")
++
++    # 失败
++    r2 = handler.approve_memory({"memory_id": "nonexistent"})
++    assert "request_id" in r2
++    assert r2["request_id"].startswith("req_")
++
++    # propose（成功+blocked 也算成功响应）
++    r3 = handler.propose_memory({
++        "project_id": "test-proj",
++        "title": "含私钥", "content": "-----BEGIN RSA PRIVATE KEY-----\ntest",
++        "actor": "test",
++    })
++    assert "request_id" in r3
++    assert r3["request_id"].startswith("req_")

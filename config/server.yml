@@ -8,6 +8,16 @@ server:
   log_level: "INFO"
   log_file: "data/logs/mcp-server.log"
 
+# 运行期日志
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  file_enabled: true
+  stderr_enabled: true
+  max_bytes: 5242880
+  backup_count: 5
+  redact_sensitive: true
+
 # 数据库
 database:
   path: "data/memory.db"

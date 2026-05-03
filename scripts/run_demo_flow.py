@@ -3,14 +3,18 @@
 
 使用：
     python scripts/run_demo_flow.py
+
+环境变量：
+    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
+
+exit 0 = 全部关键步骤通过, exit 1 = 有失败
 """
 
 import json
 import sys
-from pathlib import Path
 
-_src = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(_src))
+import _paths
+_ = _paths.ensure_import_paths()
 
 from project_memory_mcp.app_context import AppContext
 from project_memory_mcp.tools.handlers import ToolHandler
@@ -24,38 +28,43 @@ def _print(title: str, result: dict):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def main():
-    config_dir = Path(__file__).parent.parent / "config"
-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+def _check(title: str, result: dict, failures: list, ok_required=True):
+    _print(title, result)
+    if ok_required and not result.get("ok"):
+        failures.append(f"{title}: ok=false, error={result.get('error', {}).get('code', 'unknown')}")
 
+
+def main():
+    config_dir, db_path = _paths.get_project_paths()
     ctx = AppContext(config_dir=config_dir, db_path=db_path)
     ctx.sync_projects()
     handler = ToolHandler(ctx)
+    failures: list[str] = []
 
-    # 1. 填充演示数据（幂等）
+    # 1. 填充演示数据
     seed_result = seed(ctx)
-    print(f"演示数据: 新增 {seed_result['created']}, 跳过 {seed_result['skipped']}")
+    print(f"演示数据: 新增 {seed_result['created']}, 跳过 {seed_result['skipped']},"
+          f" 缺失项目 {seed_result.get('missing_project', 0)}")
 
     # 2. list_projects
-    _print("2. list_projects", handler.list_projects({}))
+    _check("2. list_projects", handler.list_projects({}), failures)
 
-    # 3. search ERP 项目
-    _print("3. search ERP: 产品 材料", handler.search_project_context({
+    # 3. search ERP
+    _check("3. search ERP: 产品 材料", handler.search_project_context({
         "project_id": "biaopai-erp", "query": "产品 材料",
-    }))
+    }), failures)
 
-    # 4. search CDR 项目
-    _print("4. search CDR: CorelDRAW 弹窗", handler.search_project_context({
+    # 4. search CDR
+    _check("4. search CDR: CorelDRAW 弹窗", handler.search_project_context({
         "project_id": "cdr-converter", "query": "CorelDRAW 弹窗",
-    }))
+    }), failures)
 
-    # 5. search global (MySQL collation)
-    _print("5. search ERP: collation 1267 (global)", handler.search_project_context({
+    # 5. search global
+    _check("5. search: collation 1267 (global)", handler.search_project_context({
         "project_id": "biaopai-erp", "query": "collation 1267",
-    }))
+    }), failures)
 
-    # 6. propose 普通知识
+    # 6. propose
     pr = handler.propose_memory({
         "project_id": "biaopai-erp",
         "title": "ERP 订单模块需要加事务注解",
@@ -66,24 +75,26 @@ def main():
         "source_type": "ai_inferred",
         "actor": "demo-flow",
     })
-    _print("6. propose_memory(普通)", pr)
-    mid = pr["data"].get("memory_id", "")
+    _check("6. propose_memory(普通)", pr, failures)
+    mid = ""
+    if pr.get("ok") and pr.get("data"):
+        mid = pr["data"].get("memory_id", "")
 
-    # 7. list pending_review
-    _print("7. list_memories(pending_review)", handler.list_memories({
+    # 7. list pending
+    _check("7. list_memories(pending_review)", handler.list_memories({
         "project_id": "biaopai-erp", "status_filter": "pending_review",
-    }))
+    }), failures)
 
     # 8. approve
     if mid:
-        _print("8. approve_memory", handler.approve_memory({
+        _check("8. approve_memory", handler.approve_memory({
             "memory_id": mid, "reviewer": "demo", "comment": "确认正确",
-        }))
+        }), failures)
 
-    # 9. re-search — should find approved
-    _print("9. re-search: 订单 事务", handler.search_project_context({
+    # 9. re-search
+    _check("9. re-search: 订单 事务", handler.search_project_context({
         "project_id": "biaopai-erp", "query": "订单 事务",
-    }))
+    }), failures)
 
     # 10. propose blocked
     br = handler.propose_memory({
@@ -92,17 +103,28 @@ def main():
         "content": "-----BEGIN RSA PRIVATE KEY-----\ntest",
         "actor": "demo-flow",
     })
+    # blocked 返回 ok=true + status=rejected，不算失败
     _print("10. propose_memory(blocked)", br)
+    if br.get("ok") and br.get("data", {}).get("status") != "rejected":
+        failures.append("10. propose_memory(blocked): 预期 rejected, 实际未 blocked")
 
     # 11. resolve
-    _print("11. resolve_project(workspace)", handler.resolve_project({
+    _check("11. resolve_project(workspace)", handler.resolve_project({
         "workspace_path": "D:/workspace/biaopai-erp",
-    }))
+    }), failures)
 
     ctx.db.close()
+
     print(f"\n{'=' * 50}")
-    print("  演示流程完成")
-    print(f"{'=' * 50}")
+    if failures:
+        print(f"  演示流程失败 ({len(failures)} 项)")
+        for f in failures:
+            print(f"    - {f}")
+        print(f"{'=' * 50}")
+        sys.exit(1)
+    else:
+        print("  演示流程完成")
+        print(f"{'=' * 50}")
 
 
 if __name__ == "__main__":

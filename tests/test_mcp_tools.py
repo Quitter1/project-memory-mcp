@@ -313,3 +313,25 @@ def test_make_error_response():
     assert r["error"]["code"] == "code123"
     assert r["error"]["message"] == "message"
     assert r["error"]["details"] == {"detail": "x"}
+
+
+def test_request_id_in_all_responses(handler):
+    """所有 tool 成功和失败响应都包含 request_id。"""
+    # 成功
+    r1 = handler.list_projects({"status_filter": "active"})
+    assert "request_id" in r1
+    assert r1["request_id"].startswith("req_")
+
+    # 失败
+    r2 = handler.approve_memory({"memory_id": "nonexistent"})
+    assert "request_id" in r2
+    assert r2["request_id"].startswith("req_")
+
+    # propose（成功+blocked 也算成功响应）
+    r3 = handler.propose_memory({
+        "project_id": "test-proj",
+        "title": "含私钥", "content": "-----BEGIN RSA PRIVATE KEY-----\ntest",
+        "actor": "test",
+    })
+    assert "request_id" in r3
+    assert r3["request_id"].startswith("req_")

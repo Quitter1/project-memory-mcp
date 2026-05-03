@@ -1,0 +1,391 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d384382..f711238 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -144,7 +144,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6 — 端到端集成测试（多项目隔离/安全闭环/MCP 格式/demo 数据/dev_check）。
++当前阶段：阶段 6.1 — 脚本收口（run_demo 直接运行/ENV 路径/dev_check FK 检查/seed 幂等/subprocess 测试）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/scripts/dev_check.py b/scripts/dev_check.py
+index 04acdb2..058db53 100644
+--- a/scripts/dev_check.py
++++ b/scripts/dev_check.py
+@@ -1,11 +1,13 @@
+ """
+ 开发环境健康检查。
+ 
+-检查项：Python版本、目录、配置文件、数据库、服务初始化。
+-
+ 使用：
+     python scripts/dev_check.py
+-    # exit code 0 = 一切正常, 非0 = 有问题
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
++
++exit code 0 = 一切正常, 非0 = 有问题
+ """
+ 
+ import os
+@@ -13,7 +15,20 @@ import sys
+ import sqlite3
+ from pathlib import Path
+ 
+-_PROJECT_ROOT = Path(__file__).parent.parent
++_PROJECT_ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(_PROJECT_ROOT))
++sys.path.insert(0, str(_PROJECT_ROOT / "src"))
++
++
++def _get_paths():
++    cd = os.environ.get("PROJECT_MEMORY_CONFIG_DIR")
++    dp = os.environ.get("PROJECT_MEMORY_DB_PATH")
++    config_dir = Path(cd) if cd else _PROJECT_ROOT / "config"
++    db_path = Path(dp) if dp else _PROJECT_ROOT / "data" / "memory.db"
++    db_path.parent.mkdir(parents=True, exist_ok=True)
++    return config_dir, db_path
++
++
+ _exit_code = 0
+ 
+ 
+@@ -34,7 +49,7 @@ def check_python():
+     if v >= (3, 10):
+         _ok("Python >= 3.10")
+     else:
+-        _fail(f"需要 Python >= 3.10，当前 {v.major}.{v.minor}")
++        _fail(f"需要 Python >= 3.10, 当前 {v.major}.{v.minor}")
+ 
+ 
+ def check_dirs():
+@@ -47,34 +62,49 @@ def check_dirs():
+             _fail(f"{d} 目录不存在")
+ 
+ 
+-def check_config():
++def check_config(config_dir: Path):
+     print("\n3. 配置文件")
+-    yml = _PROJECT_ROOT / "config" / "projects.yml"
++    yml = config_dir / "projects.yml"
+     if yml.exists():
+         _ok(f"projects.yml ({yml.stat().st_size} bytes)")
+     else:
+-        _fail("config/projects.yml 不存在")
++        _fail(f"projects.yml 不存在: {yml}")
+ 
+ 
+-def check_db():
++def check_db(db_path: Path):
+     print("\n4. SQLite 数据库")
+-    db = _PROJECT_ROOT / "data" / "memory.db"
+-    if not db.exists():
+-        _fail("data/memory.db 不存在（请先 python scripts/init_db.py）")
++    if not db_path.exists():
++        _fail(f"memory.db 不存在: {db_path}（请先 python scripts/init_db.py）")
+         return
+ 
+-    _ok(f"memory.db ({db.stat().st_size} bytes)")
+-    conn = sqlite3.connect(str(db))
++    _ok(f"memory.db ({db_path.stat().st_size} bytes)")
++    conn = sqlite3.connect(str(db_path))
+     conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
+ 
+     r = conn.execute("PRAGMA user_version").fetchone()
+-    print(f"   user_version = {r[0]}")
++    uv = r[0]
++    print(f"   user_version = {uv}")
++    if uv >= 2:
++        _ok("user_version >= 2")
++    else:
++        _fail(f"user_version = {uv}, 期望 >= 2")
+ 
+     r = conn.execute("PRAGMA journal_mode").fetchone()
+-    print(f"   journal_mode = {r[0]}")
++    jm = r[0]
++    print(f"   journal_mode = {jm}")
++    if jm == "wal":
++        _ok("journal_mode = wal")
++    else:
++        _fail(f"journal_mode = {jm}, 期望 wal")
+ 
+     r = conn.execute("PRAGMA foreign_keys").fetchone()
+-    print(f"   foreign_keys = {r[0]}")
++    fk = r[0]
++    print(f"   foreign_keys = {fk}")
++    if fk == 1:
++        _ok("foreign_keys = ON")
++    else:
++        _fail(f"foreign_keys = {fk}, 期望 1")
+ 
+     n_projects = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+     print(f"   projects = {n_projects}")
+@@ -88,27 +118,22 @@ def check_db():
+     conn.close()
+ 
+ 
+-def check_config_loader():
++def check_config_loader(config_dir: Path):
+     print("\n5. ConfigLoader")
+-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+     try:
+         from project_memory_mcp.config.loader import ConfigLoader
+-        cl = ConfigLoader(str(_PROJECT_ROOT / "config"))
++        cl = ConfigLoader(str(config_dir))
+         projects = cl.load_all_projects()
+         _ok(f"加载了 {len(projects)} 个项目")
+     except Exception as e:
+         _fail(f"ConfigLoader 失败: {e}")
+ 
+ 
+-def check_app_context():
++def check_app_context(config_dir: Path, db_path: Path):
+     print("\n6. AppContext")
+-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+     try:
+         from project_memory_mcp.app_context import AppContext
+-        ctx = AppContext(
+-            config_dir=_PROJECT_ROOT / "config",
+-            db_path=_PROJECT_ROOT / "data" / "memory.db",
+-        )
++        ctx = AppContext(config_dir=config_dir, db_path=db_path)
+         _ok("AppContext 初始化成功")
+         ctx.db.close()
+     except Exception as e:
+@@ -116,15 +141,17 @@ def check_app_context():
+ 
+ 
+ def main():
++    config_dir, db_path = _get_paths()
++
+     print("=" * 50)
+     print("  Project Memory MCP — 开发环境健康检查")
+     print("=" * 50)
+     check_python()
+     check_dirs()
+-    check_config()
+-    check_db()
+-    check_config_loader()
+-    check_app_context()
++    check_config(config_dir)
++    check_db(db_path)
++    check_config_loader(config_dir)
++    check_app_context(config_dir, db_path)
+     print(f"\n{'=' * 50}")
+     if _exit_code == 0:
+         print("  全部检查通过")
+diff --git a/scripts/run_demo_flow.py b/scripts/run_demo_flow.py
+index cd15f70..a44bda1 100644
+--- a/scripts/run_demo_flow.py
++++ b/scripts/run_demo_flow.py
+@@ -3,14 +3,29 @@
+ 
+ 使用：
+     python scripts/run_demo_flow.py
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
+ """
+ 
+ import json
++import os
+ import sys
+ from pathlib import Path
+ 
+-_src = Path(__file__).parent.parent / "src"
+-sys.path.insert(0, str(_src))
++_PROJECT_ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(_PROJECT_ROOT))
++sys.path.insert(0, str(_PROJECT_ROOT / "src"))
++
++
++def _get_paths():
++    cd = os.environ.get("PROJECT_MEMORY_CONFIG_DIR")
++    dp = os.environ.get("PROJECT_MEMORY_DB_PATH")
++    config_dir = Path(cd) if cd else _PROJECT_ROOT / "config"
++    db_path = Path(dp) if dp else _PROJECT_ROOT / "data" / "memory.db"
++    db_path.parent.mkdir(parents=True, exist_ok=True)
++    return config_dir, db_path
++
+ 
+ from project_memory_mcp.app_context import AppContext
+ from project_memory_mcp.tools.handlers import ToolHandler
+@@ -25,10 +40,7 @@ def _print(title: str, result: dict):
+ 
+ 
+ def main():
+-    config_dir = Path(__file__).parent.parent / "config"
+-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
+-    db_path.parent.mkdir(parents=True, exist_ok=True)
+-
++    config_dir, db_path = _get_paths()
+     ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     ctx.sync_projects()
+     handler = ToolHandler(ctx)
+@@ -40,22 +52,22 @@ def main():
+     # 2. list_projects
+     _print("2. list_projects", handler.list_projects({}))
+ 
+-    # 3. search ERP 项目
++    # 3. search ERP
+     _print("3. search ERP: 产品 材料", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "产品 材料",
+     }))
+ 
+-    # 4. search CDR 项目
++    # 4. search CDR
+     _print("4. search CDR: CorelDRAW 弹窗", handler.search_project_context({
+         "project_id": "cdr-converter", "query": "CorelDRAW 弹窗",
+     }))
+ 
+-    # 5. search global (MySQL collation)
++    # 5. search global
+     _print("5. search ERP: collation 1267 (global)", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "collation 1267",
+     }))
+ 
+-    # 6. propose 普通知识
++    # 6. propose
+     pr = handler.propose_memory({
+         "project_id": "biaopai-erp",
+         "title": "ERP 订单模块需要加事务注解",
+@@ -67,9 +79,11 @@ def main():
+         "actor": "demo-flow",
+     })
+     _print("6. propose_memory(普通)", pr)
+-    mid = pr["data"].get("memory_id", "")
++    mid = ""
++    if pr.get("ok") and pr.get("data"):
++        mid = pr["data"].get("memory_id", "")
+ 
+-    # 7. list pending_review
++    # 7. list pending
+     _print("7. list_memories(pending_review)", handler.list_memories({
+         "project_id": "biaopai-erp", "status_filter": "pending_review",
+     }))
+@@ -80,7 +94,7 @@ def main():
+             "memory_id": mid, "reviewer": "demo", "comment": "确认正确",
+         }))
+ 
+-    # 9. re-search — should find approved
++    # 9. re-search
+     _print("9. re-search: 订单 事务", handler.search_project_context({
+         "project_id": "biaopai-erp", "query": "订单 事务",
+     }))
+diff --git a/scripts/seed_demo_data.py b/scripts/seed_demo_data.py
+index db268e9..e57c506 100644
+--- a/scripts/seed_demo_data.py
++++ b/scripts/seed_demo_data.py
+@@ -3,13 +3,29 @@
+ 
+ 使用：
+     python scripts/seed_demo_data.py
++
++环境变量：
++    PROJECT_MEMORY_CONFIG_DIR — 配置目录
++    PROJECT_MEMORY_DB_PATH — 数据库路径
+ """
+ 
++import os
+ import sys
+ from pathlib import Path
+ 
+-_src = Path(__file__).parent.parent / "src"
+-sys.path.insert(0, str(_src))
++_PROJECT_ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(_PROJECT_ROOT))
++sys.path.insert(0, str(_PROJECT_ROOT / "src"))
++
++
++def _get_paths():
++    cd = os.environ.get("PROJECT_MEMORY_CONFIG_DIR")
++    dp = os.environ.get("PROJECT_MEMORY_DB_PATH")
++    config_dir = Path(cd) if cd else _PROJECT_ROOT / "config"
++    db_path = Path(dp) if dp else _PROJECT_ROOT / "data" / "memory.db"
++    db_path.parent.mkdir(parents=True, exist_ok=True)
++    return config_dir, db_path
++
+ 
+ from project_memory_mcp.app_context import AppContext
+ from project_memory_mcp.models.memory_item import MemoryItem
+@@ -69,7 +85,7 @@ DEMO_DATA = [
+         "tags": ["Electron", "webview", "RPA"],
+         "source_type": "user_confirmed",
+     },
+-    # ── global (绑定 img-vector-search 但 scope=global) ──
++    # ── global ───────────────────────────────────────
+     {
+         "project_id": "img-vector-search",
+         "title": "MySQL 1267 collation 错误排查",
+@@ -95,8 +111,9 @@ DEMO_DATA = [
+ ]
+ 
+ 
+-def _existing_hash_set(ctx):
+-    hashes = set()
++def _existing_key_set(ctx):
++    """返回已存在的 (project_id, scope, content_hash) 集合。"""
++    keys = set()
+     for d in DEMO_DATA:
+         h = compute_content_hash(d["content"])
+         existing = ctx.memory_repo.find_by_hash(
+@@ -104,19 +121,26 @@ def _existing_hash_set(ctx):
+             active_statuses={"approved", "pending_review", "candidate", "conflict"},
+         )
+         if existing is not None:
+-            hashes.add(h)
+-    return hashes
++            keys.add((d["project_id"], d["scope"], h))
++    return keys
+ 
+ 
+ def seed(ctx: AppContext) -> dict:
+     ctx.sync_projects()
+-    existing_hashes = _existing_hash_set(ctx)
++    existing_keys = _existing_key_set(ctx)
+     created = 0
+     skipped = 0
++    missing_proj = 0
+ 
+     for d in DEMO_DATA:
++        # 跳过不存在的项目
++        if ctx.config_loader.get_project(d["project_id"]) is None:
++            missing_proj += 1
++            continue
++
+         h = compute_content_hash(d["content"])
+-        if h in existing_hashes:
++        k = (d["project_id"], d["scope"], h)
++        if k in existing_keys:
+             skipped += 1
+             continue
+ 
+@@ -138,19 +162,16 @@ def seed(ctx: AppContext) -> dict:
+         )
+         ctx.memory_repo.create_memory(item, actor="seed_demo_data", reason="演示数据填充")
+         created += 1
+-        existing_hashes.add(h)
++        existing_keys.add(k)
+ 
+-    return {"created": created, "skipped": skipped, "total": len(DEMO_DATA)}
++    return {"created": created, "skipped": skipped, "missing_project": missing_proj, "total": len(DEMO_DATA)}
+ 
+ 
+ def main():
+-    config_dir = Path(__file__).parent.parent / "config"
+-    db_path = Path(__file__).parent.parent / "data" / "memory.db"
+-    db_path.parent.mkdir(parents=True, exist_ok=True)
+-
++    config_dir, db_path = _get_paths()
+     ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     result = seed(ctx)
+-    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']}, 总计 {result['total']}")
++    print(f"演示数据填充完成: 新增 {result['created']}, 跳过 {result['skipped']}, 缺失项目 {result['missing_project']}, 总计 {result['total']}")
+     ctx.db.close()
+ 
+ 
