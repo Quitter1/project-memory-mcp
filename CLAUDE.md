@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 6.3 — 脚本+日志收口（_paths与server同源/run_demo退出码/request_id/工具日志/诊断脚本）。
+当前阶段：阶段 6.4 — 日志接入收口（AppContext初始化日志/redaction/diagnose FK/errors.log/审计）。
 
 ### changed_files 路径规则
 

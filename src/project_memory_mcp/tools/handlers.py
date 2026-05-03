@@ -29,20 +29,30 @@ def make_error_response(code: str, message: str, details: dict | None = None, re
 
 
 def _safe_param_summary(params: dict) -> str:
-    """生成安全的参数摘要（不含敏感原文）。"""
+    """生成安全的参数摘要 — 只输出长度/计数/安全标识，不含原文。"""
     parts = []
-    for key in ("project_id", "query", "type", "module", "scope", "source_type", "status_filter"):
+    for key in ("project_id", "type", "module", "scope", "source_type", "status_filter"):
         if key in params and params[key]:
-            val = str(params[key])
-            parts.append(f"{key}={val[:40]}")
-    if "tags" in params and params["tags"]:
+            parts.append(f"{key}={str(params[key])[:40]}")
+    if params.get("query"):
+        parts.append(f"query_length={len(str(params['query']))}")
+    if params.get("title"):
+        parts.append(f"title_length={len(str(params['title']))}")
+    if params.get("content"):
+        parts.append(f"content_length={len(str(params['content']))}")
+    if params.get("tags"):
         parts.append(f"tag_count={len(params['tags'])}")
-    if "content" in params:
-        parts.append(f"content_length={len(str(params.get('content', '')))}")
-    if "changed_files" in params:
+    if params.get("changed_files"):
         cf = params["changed_files"]
         parts.append(f"changed_files_count={len(cf) if cf else 0}")
-    if "source_evidence" in params and params["source_evidence"]:
+    if params.get("related_files"):
+        rf = params["related_files"]
+        parts.append(f"related_files_count={len(rf) if rf else 0}")
+    if params.get("modules"):
+        parts.append(f"modules_count={len(params['modules'])}")
+    if params.get("types"):
+        parts.append(f"types_count={len(params['types'])}")
+    if params.get("source_evidence"):
         parts.append("source_evidence_present=1")
     return ", ".join(parts)
 

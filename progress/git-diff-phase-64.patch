@@ -1,0 +1,451 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index cbdfaa6..11eeb0d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6.3 — 脚本+日志收口（_paths与server同源/run_demo退出码/request_id/工具日志/诊断脚本）。
++当前阶段：阶段 6.4 — 日志接入收口（AppContext初始化日志/redaction/diagnose FK/errors.log/审计）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/README.md b/README.md
+index cd51c32..786e426 100644
+--- a/README.md
++++ b/README.md
+@@ -107,6 +107,20 @@ python -m pytest tests/ -v
+ #   Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD
+ ```
+ 
++## 日志与诊断
++
++- 默认日志目录：`logs/`
++- 主日志：`logs/project-memory-mcp.log`
++- 错误日志：`logs/errors.log`
++- 环境变量：`PROJECT_MEMORY_LOG_DIR`、`PROJECT_MEMORY_LOG_LEVEL`
++- 诊断：
++  ```bash
++  python scripts/diagnose.py
++  python scripts/diagnose.py --recent-errors
++  python scripts/diagnose.py --recent-audit
++  ```
++- 所有日志经过敏感信息 redaction（sk-/token/password 脱敏）
++
+ ## 备注
+ 
+ - Qdrant 向量检索尚未启用（keyword search 可用）
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index 0620f57..5fe5ef6 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -5,42 +5,86 @@
+     python scripts/diagnose.py
+     python scripts/diagnose.py --project biaopai-erp
+     python scripts/diagnose.py --recent-errors
++    python scripts/diagnose.py --recent-audit
+ 
+ 环境变量：
+-    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH
++    PROJECT_MEMORY_CONFIG_DIR / PROJECT_MEMORY_DB_PATH / PROJECT_MEMORY_LOG_DIR
+ """
+ 
+-import json
++import argparse
++import os
+ import sys
+ 
+ import _paths
+ _ = _paths.ensure_import_paths()
+ 
+-from project_memory_mcp.app_context import AppContext
++
++def _get_log_dir(config_dir):
++    """获取日志目录（与 AppContext 逻辑一致）。"""
++    env = os.environ.get("PROJECT_MEMORY_LOG_DIR")
++    if env:
++        return _paths.Path(env)
++    return config_dir.parent / "logs"
++
++
++def _check_db(db_path, config_dir):
++    import sqlite3
++    conn = sqlite3.connect(str(db_path))
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++
++    ok = True
++    uv = conn.execute("PRAGMA user_version").fetchone()[0]
++    jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
++    fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
++    print(f"  user_version={uv}")
++    print(f"  journal_mode={jm}")
++    print(f"  foreign_keys={fk}")
++
++    if fk != 1:
++        print("  [FAIL] foreign_keys != 1")
++        ok = False
++    if jm != "wal":
++        print("  [FAIL] journal_mode != wal")
++        ok = False
++    if uv < 2:
++        print(f"  [FAIL] user_version={uv} < 2")
++        ok = False
++
++    n_p = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
++    n_m = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
++    n_a = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
++    print(f"  projects={n_p}  memory_items={n_m}  audit_log={n_a}")
++
++    rows = conn.execute(
++        "SELECT status, COUNT(*) as cnt FROM memory_items GROUP BY status"
++    ).fetchall()
++    for r in rows:
++        print(f"    {r['status']}: {r['cnt']}")
++
++    conn.close()
++    return ok
+ 
+ 
+ def main():
+-    import argparse
+     parser = argparse.ArgumentParser(description="Project Memory MCP 诊断")
+     parser.add_argument("--project", help="指定项目 ID")
+-    parser.add_argument("--recent-errors", action="store_true", help="显示最近错误")
++    parser.add_argument("--recent-errors", action="store_true", help="显示 errors.log 最后 50 行")
++    parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
+     args = parser.parse_args()
+ 
+     config_dir, db_path = _paths.get_project_paths()
++    log_dir = _get_log_dir(config_dir)
+ 
+     print("=" * 50)
+     print("  Project Memory MCP — 运行诊断")
+     print("=" * 50)
+ 
+-    # 1. 文件检查
++    # 1. 文件
+     print("\n[1] 文件检查")
+     yml = config_dir / "projects.yml"
+     print(f"  projects.yml: {'存在' if yml.exists() else '缺失'} ({yml})")
+     print(f"  memory.db: {'存在' if db_path.exists() else '缺失'} ({db_path})")
+-
+-    log_dir = _paths._PROJECT_ROOT / "logs"
+-    main_log = log_dir / "project-memory-mcp.log"
+-    err_log = log_dir / "errors.log"
+     print(f"  日志目录: {log_dir} {'(存在)' if log_dir.is_dir() else '(不存在)'}")
+     if log_dir.is_dir():
+         for name in ["project-memory-mcp.log", "errors.log"]:
+@@ -50,32 +94,17 @@ def main():
+ 
+     # 2. 数据库
+     print("\n[2] 数据库")
+-    try:
+-        ctx = AppContext(config_dir=config_dir, db_path=db_path)
+-        import sqlite3
+-        conn = sqlite3.connect(str(db_path))
+-        conn.row_factory = sqlite3.Row
+-
+-        uv = conn.execute("PRAGMA user_version").fetchone()[0]
+-        jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
+-        fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+-        print(f"  user_version={uv}  journal_mode={jm}  foreign_keys={fk}")
+-
+-        n_p = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+-        n_m = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
+-        n_a = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+-        print(f"  projects={n_p}  memory_items={n_m}  audit_log={n_a}")
+-
+-        # 按状态分布
+-        rows = conn.execute(
+-            "SELECT status, COUNT(*) as cnt FROM memory_items GROUP BY status"
+-        ).fetchall()
+-        for r in rows:
+-            print(f"    {r['status']}: {r['cnt']}")
+-
+-        # 3. 指定项目详情
+-        if args.project:
+-            print(f"\n[3] 项目: {args.project}")
++    if db_path.exists():
++        _check_db(db_path, config_dir)
++    else:
++        print("  数据库不存在，跳过")
++
++    # 3. 项目详情
++    if args.project:
++        print(f"\n[3] 项目: {args.project}")
++        try:
++            from project_memory_mcp.app_context import AppContext
++            ctx = AppContext(config_dir=config_dir, db_path=db_path)
+             cfg = ctx.config_loader.get_project(args.project)
+             if cfg:
+                 print(f"  名称: {cfg.name}")
+@@ -86,23 +115,42 @@ def main():
+                     print(f"  总知识: {stats.get('total_memories', 0)}")
+             else:
+                 print(f"  项目不存在")
+-
+-        # 4. 最近错误
+-        if args.recent_errors:
+-            print("\n[4] 最近 audit_log (操作记录)")
++            ctx.db.close()
++        except Exception as exc:
++            print(f"  错误: {exc}")
++
++    # 4. errors.log
++    if args.recent_errors:
++        print(f"\n[4] errors.log 最近行")
++        err_file = log_dir / "errors.log"
++        if err_file.exists():
++            lines = err_file.read_text(encoding="utf-8", errors="replace").strip().split("\n")
++            for line in lines[-50:]:
++                # 脱敏
++                from project_memory_mcp.utils.logging import redact_sensitive
++                print(f"  {redact_sensitive(line)[:200]}")
++        else:
++            print("  errors.log 不存在")
++
++    # 5. audit_log
++    if args.recent_audit:
++        print(f"\n[5] 最近 audit_log")
++        if db_path.exists():
++            import sqlite3
++            conn = sqlite3.connect(str(db_path))
++            conn.row_factory = sqlite3.Row
++            conn.execute("PRAGMA foreign_keys = ON")
+             rows = conn.execute(
+-                "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 20"
++                "SELECT action, project_id, memory_id, reason, created_at "
++                "FROM audit_log ORDER BY created_at DESC LIMIT 20"
+             ).fetchall()
+             for r in rows:
+-                nv = r["new_value"]
+-                if nv and len(str(nv)) > 100:
+-                    nv = str(nv)[:100] + "..."
+-                print(f"  [{r['created_at']}] {r['action']} | {nv}")
+-
+-        conn.close()
+-        ctx.db.close()
+-    except Exception as exc:
+-        print(f"  数据库错误: {exc}")
++                reason = (r["reason"] or "")[:120]
++                print(f"  [{r['created_at']}] {r['action']} "
++                      f"project={r['project_id']} reason={reason}")
++            conn.close()
++        else:
++            print("  数据库不存在")
+ 
+     print(f"\n{'=' * 50}")
+     print("  诊断完成")
+diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
+index 3c6a6bb..d39b899 100644
+--- a/src/project_memory_mcp/app_context.py
++++ b/src/project_memory_mcp/app_context.py
+@@ -6,6 +6,8 @@
+ - 测试时可传入临时 db_path 和 config_dir
+ """
+ 
++import logging
++import os
+ import sqlite3
+ from dataclasses import dataclass, field
+ from pathlib import Path
+@@ -50,6 +52,19 @@ class AppContext:
+     governance: KnowledgeGovernance = field(init=False)
+ 
+     def __post_init__(self):
++        # 0. 日志初始化（幂等）
++        import os
++        from .utils.logging import setup_logging
++        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
++        if not log_dir:
++            log_dir = self.config_dir.parent / "logs"
++        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL", "INFO")
++        setup_logging(log_dir=Path(log_dir), level=log_level, enable_file=True)
++        logging.getLogger("project_memory_mcp").info(
++            "app_context_start config_dir=%s db_path=%s qdrant_enabled=false llm_reviewer_enabled=false",
++            self.config_dir, self.db_path,
++        )
++
+         # 1. 数据库连接 + 迁移
+         self.db = DatabaseConnection(str(self.db_path))
+         self.conn = self.db.connect()
+diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
+index b753f5f..fea3540 100644
+--- a/src/project_memory_mcp/tools/handlers.py
++++ b/src/project_memory_mcp/tools/handlers.py
+@@ -29,20 +29,30 @@ def make_error_response(code: str, message: str, details: dict | None = None, re
+ 
+ 
+ def _safe_param_summary(params: dict) -> str:
+-    """生成安全的参数摘要（不含敏感原文）。"""
++    """生成安全的参数摘要 — 只输出长度/计数/安全标识，不含原文。"""
+     parts = []
+-    for key in ("project_id", "query", "type", "module", "scope", "source_type", "status_filter"):
++    for key in ("project_id", "type", "module", "scope", "source_type", "status_filter"):
+         if key in params and params[key]:
+-            val = str(params[key])
+-            parts.append(f"{key}={val[:40]}")
+-    if "tags" in params and params["tags"]:
++            parts.append(f"{key}={str(params[key])[:40]}")
++    if params.get("query"):
++        parts.append(f"query_length={len(str(params['query']))}")
++    if params.get("title"):
++        parts.append(f"title_length={len(str(params['title']))}")
++    if params.get("content"):
++        parts.append(f"content_length={len(str(params['content']))}")
++    if params.get("tags"):
+         parts.append(f"tag_count={len(params['tags'])}")
+-    if "content" in params:
+-        parts.append(f"content_length={len(str(params.get('content', '')))}")
+-    if "changed_files" in params:
++    if params.get("changed_files"):
+         cf = params["changed_files"]
+         parts.append(f"changed_files_count={len(cf) if cf else 0}")
+-    if "source_evidence" in params and params["source_evidence"]:
++    if params.get("related_files"):
++        rf = params["related_files"]
++        parts.append(f"related_files_count={len(rf) if rf else 0}")
++    if params.get("modules"):
++        parts.append(f"modules_count={len(params['modules'])}")
++    if params.get("types"):
++        parts.append(f"types_count={len(params['types'])}")
++    if params.get("source_evidence"):
+         parts.append("source_evidence_present=1")
+     return ", ".join(parts)
+ 
+diff --git a/src/project_memory_mcp/utils/logging.py b/src/project_memory_mcp/utils/logging.py
+index fffb74c..995b274 100644
+--- a/src/project_memory_mcp/utils/logging.py
++++ b/src/project_memory_mcp/utils/logging.py
+@@ -1,9 +1,10 @@
+ """
+ 日志配置 — MCP 规范要求日志写 stderr 或文件，不写 stdout。
+ 
+-Phase 6.3: RotatingFileHandler, request_id, 诊断日志。
++Phase 6.4: 幂等初始化, redaction, AppContext 自动调用。
+ """
+ 
++import re
+ import sys
+ import logging
+ import uuid
+@@ -11,27 +12,69 @@ from logging.handlers import RotatingFileHandler
+ from pathlib import Path
+ from typing import Optional
+ 
++_log_initialized = False
++
++# 敏感信息 redaction 模式
++_REDACT_PATTERNS: list[tuple[re.Pattern, str]] = [
++    (re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"), "sk-proj-[REDACTED]"),
++    (re.compile(r"sk-svcacct-[A-Za-z0-9_-]{20,}"), "sk-svcacct-[REDACTED]"),
++    (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "sk-ant-[REDACTED]"),
++    (re.compile(r"sk-[a-z0-9]{32,}"), "sk-[REDACTED]"),
++    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "sk-[REDACTED]"),
++    (re.compile(r"OPENAI_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "OPENAI_API_KEY=[REDACTED]"),
++    (re.compile(r"ANTHROPIC_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "ANTHROPIC_API_KEY=[REDACTED]"),
++    (re.compile(r"DEEPSEEK_API_KEY\s*[=:]\s*\S+", re.IGNORECASE), "DEEPSEEK_API_KEY=[REDACTED]"),
++    (re.compile(r"token\s*[=:]\s*\S{10,}", re.IGNORECASE), "token=[REDACTED]"),
++    (re.compile(r"access[_-]?token\s*[=:]\s*\S{10,}", re.IGNORECASE), "access_token=[REDACTED]"),
++    (re.compile(r"bearer\s+\S{10,}", re.IGNORECASE), "bearer [REDACTED]"),
++    (re.compile(r"password\s*[=:]\s*\S{4,}", re.IGNORECASE), "password=[REDACTED]"),
++    (re.compile(r"pwd\s*[=:]\s*\S{4,}", re.IGNORECASE), "pwd=[REDACTED]"),
++    (re.compile(r"AKIA[0-9A-Z]{16}"), "AKIA[REDACTED]"),
++    (re.compile(r"-----BEGIN (?:RSA|EC|DSA|OPENSSH|ENCRYPTED) PRIVATE KEY-----"), "[REDACTED PRIVATE KEY]"),
++]
++
++
++def redact_sensitive(text: str) -> str:
++    """对字符串做敏感信息脱敏，替换 sk-/token/password 等。"""
++    if not text or not isinstance(text, str):
++        return text
++    for pattern, replacement in _REDACT_PATTERNS:
++        text = pattern.sub(replacement, text)
++    return text
++
++
++def sanitize_for_log(value: str, max_len: int = 80) -> str:
++    """截断 + 脱敏。"""
++    if not value:
++        return ""
++    redacted = redact_sensitive(value)
++    if len(redacted) <= max_len:
++        return redacted
++    return redacted[:max_len] + "..."
++
++
++def new_request_id() -> str:
++    return f"req_{uuid.uuid4().hex[:8]}"
++
+ 
+ def setup_logging(
+     log_dir: Optional[Path] = None,
+     level: str = "INFO",
+     enable_file: bool = True,
+ ) -> logging.Logger:
+-    """
+-    配置日志系统。
+-
+-    - stderr handler: MCP 规范（stdout 由 JSON-RPC 独占）
+-    - 主日志文件: project-memory-mcp.log (RotatingFileHandler, 5MB x 5)
+-    - 错误日志: errors.log (只记录 ERROR+)
+-    """
++    """幂等初始化日志（重复调用不叠加 handler）。"""
++    global _log_initialized
+     logger = logging.getLogger("project_memory_mcp")
+-    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+ 
++    if _log_initialized:
++        return logger
++
++    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+     formatter = logging.Formatter(
+         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+     )
+ 
+-    # stderr handler — 仅 WARNING+
++    # stderr — WARNING+
+     stderr_h = logging.StreamHandler(sys.stderr)
+     stderr_h.setLevel(logging.WARNING)
+     stderr_h.setFormatter(formatter)
+@@ -42,7 +85,6 @@ def setup_logging(
+         log_dir = Path(log_dir)
+         log_dir.mkdir(parents=True, exist_ok=True)
+ 
+-        # 主日志
+         main_h = RotatingFileHandler(
+             log_dir / "project-memory-mcp.log",
+             maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
+@@ -51,7 +93,6 @@ def setup_logging(
+         main_h.setFormatter(formatter)
+         logger.addHandler(main_h)
+ 
+-        # 错误日志
+         err_h = RotatingFileHandler(
+             log_dir / "errors.log",
+             maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
+@@ -60,20 +101,6 @@ def setup_logging(
+         err_h.setFormatter(formatter)
+         logger.addHandler(err_h)
+ 
+-        logger.info("logging initialized: log_dir=%s, level=%s", log_dir, level)
+-
++    _log_initialized = True
++    logger.info("logging initialized: log_dir=%s, level=%s", log_dir, level)
+     return logger
+-
+-
+-def new_request_id() -> str:
+-    """生成短 request_id：req_ + UUID 前8位。"""
+-    return f"req_{uuid.uuid4().hex[:8]}"
+-
+-
+-def sanitize_for_log(value: str, max_len: int = 80) -> str:
+-    """截断字符串，用于日志安全记录。"""
+-    if not value:
+-        return ""
+-    if len(value) <= max_len:
+-        return value
+-    return value[:max_len] + "..."

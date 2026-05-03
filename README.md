@@ -107,6 +107,20 @@ python -m pytest tests/ -v
 #   Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD
 ```
 
+## 日志与诊断
+
+- 默认日志目录：`logs/`
+- 主日志：`logs/project-memory-mcp.log`
+- 错误日志：`logs/errors.log`
+- 环境变量：`PROJECT_MEMORY_LOG_DIR`、`PROJECT_MEMORY_LOG_LEVEL`
+- 诊断：
+  ```bash
+  python scripts/diagnose.py
+  python scripts/diagnose.py --recent-errors
+  python scripts/diagnose.py --recent-audit
+  ```
+- 所有日志经过敏感信息 redaction（sk-/token/password 脱敏）
+
 ## 备注
 
 - Qdrant 向量检索尚未启用（keyword search 可用）

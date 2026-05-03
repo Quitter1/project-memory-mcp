@@ -6,6 +6,8 @@
 - 测试时可传入临时 db_path 和 config_dir
 """
 
+import logging
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +52,19 @@ class AppContext:
     governance: KnowledgeGovernance = field(init=False)
 
     def __post_init__(self):
+        # 0. 日志初始化（幂等）
+        import os
+        from .utils.logging import setup_logging
+        log_dir = os.environ.get("PROJECT_MEMORY_LOG_DIR")
+        if not log_dir:
+            log_dir = self.config_dir.parent / "logs"
+        log_level = os.environ.get("PROJECT_MEMORY_LOG_LEVEL", "INFO")
+        setup_logging(log_dir=Path(log_dir), level=log_level, enable_file=True)
+        logging.getLogger("project_memory_mcp").info(
+            "app_context_start config_dir=%s db_path=%s qdrant_enabled=false llm_reviewer_enabled=false",
+            self.config_dir, self.db_path,
+        )
+
         # 1. 数据库连接 + 迁移
         self.db = DatabaseConnection(str(self.db_path))
         self.conn = self.db.connect()
