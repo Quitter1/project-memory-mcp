@@ -110,7 +110,7 @@ def test_resolve_explicit_id(handler):
 def test_resolve_not_found(handler):
     r = handler.resolve_project({"project_id": "nonexistent"})
     assert r["ok"] is False
-    assert r["error"]["code"] in ("project_not_found", "project_id_required")
+    assert r["error"]["code"] == "project_not_found"
 
 
 # ── 3. get_project_profile ────────────────────────────────────
@@ -222,7 +222,7 @@ def test_approve_memory(handler):
 def test_approve_invalid_memory(handler):
     r = handler.approve_memory({"memory_id": "nonexistent"})
     assert r["ok"] is False
-    assert r["error"]["code"] == "approve_error"
+    assert r["error"]["code"] == "memory_not_found"
 
 
 # ── 8. reject_memory ─────────────────────────────────────────
@@ -289,7 +289,7 @@ def test_tags_non_string_returns_error(handler):
         "actor": "test",
     })
     assert r["ok"] is False
-    assert r["error"]["code"] == "propose_error"
+    assert r["error"]["code"] == "invalid_params"
 
 
 def test_no_traceback_in_error(handler):

@@ -186,7 +186,7 @@ def create_zip(phase: int) -> tuple[Path, int]:
                 top = parts[0]
                 allowed_tops = {
                     "README.md", "CLAUDE.md", "pyproject.toml", ".gitignore",
-                    "config", "docs", "src", "tests", "scripts", "progress",
+                    "config", "docs", "src", "tests", "scripts", "progress", "sandbox",
                 }
                 if top not in allowed_tops:
                     continue

@@ -1,0 +1,4 @@
+diff --git a/sandbox/test_mcp_client.py b/sandbox/test_tool_handler_client.py
+similarity index 100%
+rename from sandbox/test_mcp_client.py
+rename to sandbox/test_tool_handler_client.py

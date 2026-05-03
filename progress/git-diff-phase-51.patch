@@ -1,0 +1,960 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 7b165d6..591bb7b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -144,7 +144,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 5 — MCP 工具实现（9 tools + server.py + AppContext + ToolHandler + 集成测试）。
++当前阶段：阶段 5.1 — MCP 封装层收口（server 可测性/配置路径/project_id 校验/错误码分类/tools 文件实现/task_description 支持）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/scripts/make_review_pack.py b/scripts/make_review_pack.py
+index 5537b1b..29491b4 100644
+--- a/scripts/make_review_pack.py
++++ b/scripts/make_review_pack.py
+@@ -186,7 +186,7 @@ def create_zip(phase: int) -> tuple[Path, int]:
+                 top = parts[0]
+                 allowed_tops = {
+                     "README.md", "CLAUDE.md", "pyproject.toml", ".gitignore",
+-                    "config", "docs", "src", "tests", "scripts", "progress",
++                    "config", "docs", "src", "tests", "scripts", "progress", "sandbox",
+                 }
+                 if top not in allowed_tops:
+                     continue
+diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
+index a9a5ccc..3c6a6bb 100644
+--- a/src/project_memory_mcp/app_context.py
++++ b/src/project_memory_mcp/app_context.py
+@@ -94,7 +94,7 @@ class AppContext:
+     def sync_projects(self) -> int:
+         """将 projects.yml 同步到 SQLite。返回同步数量。"""
+         result = self.project_manager.sync_from_yaml()
+-        return result.get("synced", 0)
++        return result.get("created", 0) + result.get("updated", 0)
+ 
+     @classmethod
+     def create_for_test(cls, config_dir: Path, db_path: Path) -> "AppContext":
+diff --git a/src/project_memory_mcp/server.py b/src/project_memory_mcp/server.py
+index 0a5ddfd..8af5685 100644
+--- a/src/project_memory_mcp/server.py
++++ b/src/project_memory_mcp/server.py
+@@ -1,15 +1,14 @@
+ """
+ MCP Server — 基于 mcp==1.27.0 FastMCP，不手写 JSON-RPC。
+ 
+-职责：
+-1. 创建 FastMCP 实例
+-2. 初始化 AppContext
+-3. 注册 9 个 MCP tools
+-4. stdio 启动入口
++配置路径优先级：
++  PROJECT_MEMORY_CONFIG_DIR → cwd/config → 源码相对 fallback
++  PROJECT_MEMORY_DB_PATH → cwd/data/memory.db → 源码相对 fallback
+ 
+ 日志全部写 stderr，stdout 由 MCP SDK 管理。
+ """
+ 
++import os
+ import sys
+ import traceback
+ from pathlib import Path
+@@ -19,25 +18,59 @@ from mcp.server.fastmcp import FastMCP
+ from .app_context import AppContext
+ from .tools.handlers import ToolHandler, make_error_response
+ 
+-# 配置目录：项目根/config
+-_CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
+-# 数据库路径：项目根/data/memory.db
+-_DB_PATH = Path(__file__).parent.parent.parent / "data" / "memory.db"
++# 源码相对 fallback 路径
++_SRC_DIR = Path(__file__).parent.parent.parent
++
++
++def _resolve_config_dir() -> Path:
++    """按优先级解析配置目录。"""
++    env = os.environ.get("PROJECT_MEMORY_CONFIG_DIR")
++    if env:
++        return Path(env)
++    cwd = Path.cwd() / "config"
++    if cwd.exists():
++        return cwd
++    return _SRC_DIR / "config"
++
++
++def _resolve_db_path() -> Path:
++    """按优先级解析数据库路径。"""
++    env = os.environ.get("PROJECT_MEMORY_DB_PATH")
++    if env:
++        return Path(env)
++    cwd = Path.cwd() / "data" / "memory.db"
++    cwd.parent.mkdir(parents=True, exist_ok=True)
++    return cwd
++    # 不使用源码相对 fallback；如果 cwd 不可用，报错退出
+ 
+ 
+ def _create_context() -> AppContext:
+     """创建并初始化 AppContext。"""
+-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+-    ctx = AppContext(config_dir=_CONFIG_DIR, db_path=_DB_PATH)
+-    # 启动时同步 projects.yml → SQLite
++    config_dir = _resolve_config_dir()
++    db_path = _resolve_db_path()
++
++    if not (config_dir / "projects.yml").exists():
++        msg = f"[server] 找不到 projects.yml，请检查 config_dir: {config_dir}"
++        print(msg, file=sys.stderr)
++        raise FileNotFoundError(msg)
++
++    db_path.parent.mkdir(parents=True, exist_ok=True)
++    ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     ctx.sync_projects()
+     return ctx
+ 
+ 
+-def create_server() -> FastMCP:
+-    """创建 FastMCP 实例并注册所有工具。"""
++def create_server(ctx: AppContext | None = None) -> FastMCP:
++    """
++    创建 FastMCP 实例并注册所有工具。
++
++    ctx=None 时自动创建 AppContext（使用环境变量/cwd/fallback 路径）。
++    测试时可传入已有 ctx 避免依赖真实文件系统。
++    """
++    if ctx is None:
++        ctx = _create_context()
++
+     mcp = FastMCP("project-memory-mcp")
+-    ctx = _create_context()
+     handler = ToolHandler(ctx)
+ 
+     # ── 查询类 ──────────────────────────────────────────────
+@@ -55,7 +88,7 @@ def create_server() -> FastMCP:
+         related_files: list = None,
+         task_description: str = "",
+     ) -> dict:
+-        """多策略项目识别：支持 project_id/workspace_path/changed_files/task_description。"""
++        """多策略项目识别。"""
+         return handler.resolve_project({
+             "project_id": project_id or None,
+             "workspace_path": workspace_path or None,
+@@ -76,6 +109,8 @@ def create_server() -> FastMCP:
+         project_id: str = "",
+         workspace_path: str = "",
+         changed_files: list = None,
++        related_files: list = None,
++        task_description: str = "",
+         query: str = "",
+         modules: list = None,
+         types: list = None,
+@@ -86,11 +121,13 @@ def create_server() -> FastMCP:
+         include_global: bool = True,
+         include_candidates: bool = False,
+     ) -> dict:
+-        """检索项目上下文，返回 context_pack 格式。支持 project_id 自动 resolve。"""
++        """检索项目上下文，返回 context_pack。"""
+         return handler.search_project_context({
+             "project_id": project_id or None,
+             "workspace_path": workspace_path or None,
+             "changed_files": changed_files,
++            "related_files": related_files,
++            "task_description": task_description,
+             "query": query,
+             "modules": modules,
+             "types": types,
+@@ -109,6 +146,8 @@ def create_server() -> FastMCP:
+         project_id: str = "",
+         workspace_path: str = "",
+         changed_files: list = None,
++        related_files: list = None,
++        task_description: str = "",
+         title: str = "",
+         content: str = "",
+         type: str = "other",
+@@ -124,11 +163,13 @@ def create_server() -> FastMCP:
+         actor: str = "mcp-agent",
+         task_id: str = "",
+     ) -> dict:
+-        """提交候选知识，走完整治理流水线（校验→去重→审批→写入）。"""
++        """提交候选知识，走完整治理流水线。"""
+         return handler.propose_memory({
+             "project_id": project_id or None,
+             "workspace_path": workspace_path or None,
+             "changed_files": changed_files,
++            "related_files": related_files,
++            "task_description": task_description,
+             "title": title,
+             "content": content,
+             "type": type,
+@@ -157,7 +198,7 @@ def create_server() -> FastMCP:
+         limit: int = 50,
+         offset: int = 0,
+     ) -> dict:
+-        """列出项目知识条目，支持按状态/类型/模块/标签过滤。"""
++        """列出项目知识条目。"""
+         return handler.list_memories({
+             "project_id": project_id,
+             "status_filter": status_filter or None,
+@@ -177,7 +218,7 @@ def create_server() -> FastMCP:
+         comment: str = "",
+         confidence_override: float = None,
+     ) -> dict:
+-        """审核通过候选/待审核知识，变为 approved。"""
++        """审核通过候选知识。"""
+         return handler.approve_memory({
+             "memory_id": memory_id,
+             "reviewer": reviewer,
+@@ -191,7 +232,7 @@ def create_server() -> FastMCP:
+         reviewer: str = "system",
+         reason: str = "",
+     ) -> dict:
+-        """审核拒绝候选/待审核知识，变为 rejected（终态）。"""
++        """审核拒绝候选知识。"""
+         return handler.reject_memory({
+             "memory_id": memory_id,
+             "reviewer": reviewer,
+@@ -203,7 +244,7 @@ def create_server() -> FastMCP:
+         memory_id: str = "",
+         reason: str = "",
+     ) -> dict:
+-        """废弃已生效知识，变为 deprecated（终态）。"""
++        """废弃已生效知识。"""
+         return handler.deprecate_memory({
+             "memory_id": memory_id,
+             "reason": reason,
+diff --git a/src/project_memory_mcp/tools/approve_memory.py b/src/project_memory_mcp/tools/approve_memory.py
+index 68fc8a8..4827e5b 100644
+--- a/src/project_memory_mcp/tools/approve_memory.py
++++ b/src/project_memory_mcp/tools/approve_memory.py
+@@ -1,3 +1,29 @@
+-"""approve_memory 工具 — 审核通过候选知识。"""
++"""approve_memory — 审核通过候选知识。"""
+ 
+-# TODO: 阶段 5 实现
++import traceback
++import sys
++from .handlers import make_response, make_error_response
++
++
++def handle(ctx, params: dict) -> dict:
++    memory_id = params.get("memory_id", "")
++    if not memory_id:
++        return make_error_response("invalid_params", "memory_id 是必填参数")
++
++    try:
++        result = ctx.governance.approve_memory(
++            memory_id=memory_id,
++            reviewer=params.get("reviewer", "system"),
++            comment=params.get("comment", ""),
++            confidence_override=params.get("confidence_override"),
++        )
++        return make_response(result)
++    except Exception as exc:
++        name = type(exc).__name__
++        if "GovernanceError" in name:
++            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++            print(f"[approve_memory] {name}: {exc}", file=sys.stderr)
++            return make_error_response(code, str(exc))
++        tb = traceback.format_exc()
++        print(f"[approve_memory] {tb}", file=sys.stderr)
++        return make_error_response("governance_error", str(exc))
+diff --git a/src/project_memory_mcp/tools/deprecate_memory.py b/src/project_memory_mcp/tools/deprecate_memory.py
+index c9cca17..1b7b255 100644
+--- a/src/project_memory_mcp/tools/deprecate_memory.py
++++ b/src/project_memory_mcp/tools/deprecate_memory.py
+@@ -1,3 +1,28 @@
+-"""deprecate_memory 工具 — 废弃已生效知识（不用于拒绝候选知识）。"""
++"""deprecate_memory — 废弃已生效知识。"""
+ 
+-# TODO: 阶段 5 实现
++import traceback
++import sys
++from .handlers import make_response, make_error_response
++
++
++def handle(ctx, params: dict) -> dict:
++    memory_id = params.get("memory_id", "")
++    if not memory_id:
++        return make_error_response("invalid_params", "memory_id 是必填参数")
++
++    try:
++        result = ctx.governance.deprecate_memory(
++            memory_id=memory_id,
++            reason=params.get("reason", ""),
++            actor=params.get("actor", "mcp-agent"),
++        )
++        return make_response(result)
++    except Exception as exc:
++        name = type(exc).__name__
++        if "GovernanceError" in name:
++            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++            print(f"[deprecate_memory] {name}: {exc}", file=sys.stderr)
++            return make_error_response(code, str(exc))
++        tb = traceback.format_exc()
++        print(f"[deprecate_memory] {tb}", file=sys.stderr)
++        return make_error_response("governance_error", str(exc))
+diff --git a/src/project_memory_mcp/tools/get_project_profile.py b/src/project_memory_mcp/tools/get_project_profile.py
+index 9fd7c67..a1cda82 100644
+--- a/src/project_memory_mcp/tools/get_project_profile.py
++++ b/src/project_memory_mcp/tools/get_project_profile.py
+@@ -1,3 +1,18 @@
+-"""get_project_profile 工具 — 获取项目配置 + 统计信息。"""
++"""get_project_profile — 项目配置 + 知识统计。"""
+ 
+-# TODO: 阶段 5 实现
++from .handlers import make_response, make_error_response
++
++
++def handle(ctx, params: dict) -> dict:
++    pid = params.get("project_id", "")
++    if not pid:
++        return make_error_response("invalid_params", "project_id 是必填参数")
++
++    profile = ctx.profile_builder.build(pid)
++    if profile is None:
++        return make_error_response("project_not_found", f"项目 {pid} 不存在")
++
++    return make_response({
++        "project": profile.get("project", {}),
++        "stats": profile.get("stats", {}),
++    })
+diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
+index 5080cc7..adc7e00 100644
+--- a/src/project_memory_mcp/tools/handlers.py
++++ b/src/project_memory_mcp/tools/handlers.py
+@@ -1,17 +1,10 @@
+-"""工具路由 + 参数校验 + 统一错误处理。
+-
+-Phase 5 实现：
+-- make_response / make_error_response 统一返回格式
+-- resolve_project_or_error 统一 project_id resolve 逻辑
+-- ToolHandler 分发器（所有 tool handler 共享同一个 AppContext）
+-"""
++"""工具路由 + 参数校验 + 统一错误处理 + resolve helper。"""
+ 
+ import traceback
+ import sys
+ from typing import Optional
+ 
+ from ..project.resolver import ResolveRequest
+-from ..config.schema import ProjectConfig
+ 
+ 
+ # ── 统一返回格式 ──────────────────────────────────────────────
+@@ -48,7 +41,16 @@ def resolve_project_or_error(ctx, project_id=None, workspace_path=None,
+             cfg = ctx.config_loader.get_project(pid)
+             if cfg is not None:
+                 return cfg, None
+-            return None, make_error_response("project_not_found", f"项目 {pid} 不在配置中")
++            # Phase 5.1: 项目已 resolve 但不在配置中
++            return None, make_error_response(
++                "project_not_found",
++                f"项目 {pid} 不在配置中",
++                {
++                    "suggest_projects": [
++                        p.slug for p in ctx.config_loader.list_active_projects()
++                    ],
++                },
++            )
+ 
+         if result.ambiguous:
+             return None, make_error_response(
+@@ -57,6 +59,18 @@ def resolve_project_or_error(ctx, project_id=None, workspace_path=None,
+                 {"candidates": result.candidates},
+             )
+ 
++        # Phase 5.1: 区分 project_not_found vs project_id_required
++        if result.error and "project_not_found" in result.error:
++            return None, make_error_response(
++                "project_not_found",
++                f"项目 {project_id} 不存在",
++                {
++                    "suggest_projects": [
++                        p.slug for p in ctx.config_loader.list_active_projects()
++                    ],
++                },
++            )
++
+         return None, make_error_response(
+             "project_id_required",
+             "无法识别项目，请提供 project_id、workspace_path 或 changed_files",
+@@ -75,264 +89,43 @@ def resolve_project_or_error(ctx, project_id=None, workspace_path=None,
+ # ── ToolHandler ─────────────────────────────────────────────────
+ 
+ class ToolHandler:
+-    """MCP 工具处理分发器。"""
++    """MCP 工具处理分发器，委托到各 tools/*.py 的 handle() 函数。"""
+ 
+     def __init__(self, ctx):
+         self.ctx = ctx
+ 
+-    # ── 查询类 ──────────────────────────────────────────────────
+-
+     def list_projects(self, params: dict) -> dict:
+-        status_filter = params.get("status_filter", "active")
+-        if status_filter == "active":
+-            projects = self.ctx.config_loader.list_active_projects()
+-        else:
+-            projects = self.ctx.config_loader.load_all_projects()
+-            if status_filter:
+-                projects = [p for p in projects if p.status == status_filter]
+-
+-        project_list = []
+-        for p in projects:
+-            profile = self.ctx.profile_builder.build(p.id)
+-            stats = profile.get("stats", {}) if profile else {}
+-            project_list.append({
+-                "id": p.id,
+-                "name": p.name,
+-                "slug": p.slug,
+-                "status": p.status,
+-                "memory_count": stats.get("total_memories", 0),
+-            })
+-        return make_response({"projects": project_list, "total": len(project_list)})
++        from .list_projects import handle
++        return handle(self.ctx, params)
+ 
+     def resolve_project(self, params: dict) -> dict:
+-        project, error = resolve_project_or_error(
+-            self.ctx,
+-            project_id=params.get("project_id"),
+-            workspace_path=params.get("workspace_path"),
+-            changed_files=params.get("changed_files"),
+-            related_files=params.get("related_files"),
+-            task_description=params.get("task_description"),
+-        )
+-        if error:
+-            return error
+-
+-        return make_response({
+-            "resolved": True,
+-            "ambiguous": False,
+-            "project": {
+-                "id": project.id,
+-                "name": project.name,
+-                "slug": project.slug,
+-                "status": project.status,
+-            },
+-            "match_method": params.get("project_id") and "explicit" or "inferred",
+-            "confidence": 0.95 if params.get("project_id") else 0.5,
+-            "warnings": [],
+-        })
++        from .resolve_project import handle
++        return handle(self.ctx, params)
+ 
+     def get_project_profile(self, params: dict) -> dict:
+-        pid = params.get("project_id", "")
+-        if not pid:
+-            return make_error_response("invalid_params", "project_id 是必填参数")
+-
+-        profile = self.ctx.profile_builder.build(pid)
+-        if profile is None:
+-            return make_error_response("project_not_found", f"项目 {pid} 不存在")
+-
+-        project_data = profile.get("project", {})
+-        stats_data = profile.get("stats", {})
+-        return make_response({
+-            "project": project_data,
+-            "stats": stats_data,
+-        })
+-
+-    # ── 检索 ────────────────────────────────────────────────────
++        from .get_project_profile import handle
++        return handle(self.ctx, params)
+ 
+     def search_project_context(self, params: dict) -> dict:
+-        project_id = params.get("project_id")
+-        workspace_path = params.get("workspace_path")
+-        changed_files = params.get("changed_files")
+-
+-        if not project_id and (workspace_path or changed_files):
+-            project, error = resolve_project_or_error(
+-                self.ctx,
+-                workspace_path=workspace_path,
+-                changed_files=changed_files,
+-            )
+-            if error:
+-                return error
+-            project_id = project.id
+-
+-        if not project_id:
+-            return make_error_response(
+-                "project_id_required",
+-                "请提供 project_id、workspace_path 或 changed_files",
+-            )
+-
+-        try:
+-            result_set = self.ctx.search_service.search(
+-                project_id=project_id,
+-                query=params.get("query", ""),
+-                modules=params.get("modules") or None,
+-                types=params.get("types") or None,
+-                tags=params.get("tags") or None,
+-                max_results=params.get("max_results", 10),
+-                min_confidence=params.get("min_confidence"),
+-                include_shared=params.get("include_shared", True),
+-                include_global=params.get("include_global", True),
+-                include_candidates=params.get("include_candidates", False),
+-            )
+-            return make_response({
+-                "query": params.get("query", ""),
+-                "project_id": project_id,
+-                "context_pack": result_set.context_pack,
+-                "total_found": result_set.total_found,
+-            })
+-        except Exception as exc:
+-            tb = traceback.format_exc()
+-            print(f"[search_project_context] {tb}", file=sys.stderr)
+-            return make_error_response("search_error", str(exc))
+-
+-    # ── 写入 ────────────────────────────────────────────────────
++        from .search_context import handle
++        return handle(self.ctx, params)
+ 
+     def propose_memory(self, params: dict) -> dict:
+-        project_id = params.get("project_id")
+-        workspace_path = params.get("workspace_path")
+-        changed_files = params.get("changed_files")
+-
+-        if not project_id and (workspace_path or changed_files):
+-            project, error = resolve_project_or_error(
+-                self.ctx,
+-                workspace_path=workspace_path,
+-                changed_files=changed_files,
+-            )
+-            if error:
+-                return error
+-            project_id = project.id
+-
+-        if not project_id:
+-            return make_error_response(
+-                "project_id_required",
+-                "请提供 project_id、workspace_path 或 changed_files",
+-            )
+-
+-        project_cfg = self.ctx.config_loader.get_project(project_id)
+-        if project_cfg is None:
+-            return make_error_response("project_not_found", f"项目 {project_id} 不存在")
+-
+-        try:
+-            result = self.ctx.governance.propose_memory(
+-                title=params.get("title", ""),
+-                content=params.get("content", ""),
+-                project=project_cfg,
+-                knowledge_type=params.get("type", "other"),
+-                module=params.get("module", ""),
+-                tags=params.get("tags"),
+-                confidence=params.get("confidence", 0.5),
+-                source_type=params.get("source_type", "ai_inferred"),
+-                source_evidence=params.get("source_evidence"),
+-                source_file=params.get("source_file"),
+-                source_line=params.get("source_line"),
+-                scope=params.get("scope", "project"),
+-                allowed_projects=params.get("allowed_projects"),
+-                actor=params.get("actor", "mcp-agent"),
+-                task_id=params.get("task_id"),
+-            )
+-            return make_response(result)
+-        except Exception as exc:
+-            tb = traceback.format_exc()
+-            print(f"[propose_memory] {tb}", file=sys.stderr)
+-            return make_error_response("propose_error", str(exc))
++        from .propose_memory import handle
++        return handle(self.ctx, params)
+ 
+     def list_memories(self, params: dict) -> dict:
+-        project_id = params.get("project_id", "")
+-        if not project_id:
+-            return make_error_response("invalid_params", "project_id 是必填参数")
+-
+-        status_filter = params.get("status_filter")
+-        if status_filter and isinstance(status_filter, str):
+-            status_filter = [s.strip() for s in status_filter.split(",") if s.strip()]
+-
+-        items = self.ctx.memory_repo.list_memories(
+-            project_id=project_id,
+-            status_filter=status_filter or None,
+-            type_filter=params.get("type") or None,
+-            module_filter=params.get("module") or None,
+-            tag_filter=params.get("tag") or None,
+-            limit=min(params.get("limit", 50), 100),
+-            offset=params.get("offset", 0),
+-        )
+-        return make_response({
+-            "memories": [
+-                {
+-                    "id": m.id,
+-                    "title": m.title,
+-                    "type": m.type,
+-                    "module": m.module,
+-                    "status": m.status,
+-                    "index_status": m.index_status,
+-                    "risk_level": m.risk_level,
+-                    "confidence": m.confidence,
+-                    "scope": m.scope,
+-                    "tags": m.tags,
+-                    "created_at": m.created_at,
+-                    "updated_at": m.updated_at,
+-                }
+-                for m in items
+-            ],
+-            "total": len(items),
+-        })
+-
+-    # ── 治理 ────────────────────────────────────────────────────
++        from .list_memories import handle
++        return handle(self.ctx, params)
+ 
+     def approve_memory(self, params: dict) -> dict:
+-        memory_id = params.get("memory_id", "")
+-        if not memory_id:
+-            return make_error_response("invalid_params", "memory_id 是必填参数")
+-
+-        try:
+-            result = self.ctx.governance.approve_memory(
+-                memory_id=memory_id,
+-                reviewer=params.get("reviewer", "system"),
+-                comment=params.get("comment", ""),
+-                confidence_override=params.get("confidence_override"),
+-            )
+-            return make_response(result)
+-        except Exception as exc:
+-            tb = traceback.format_exc()
+-            print(f"[approve_memory] {tb}", file=sys.stderr)
+-            return make_error_response("approve_error", str(exc))
++        from .approve_memory import handle
++        return handle(self.ctx, params)
+ 
+     def reject_memory(self, params: dict) -> dict:
+-        memory_id = params.get("memory_id", "")
+-        if not memory_id:
+-            return make_error_response("invalid_params", "memory_id 是必填参数")
+-
+-        try:
+-            result = self.ctx.governance.reject_memory(
+-                memory_id=memory_id,
+-                reviewer=params.get("reviewer", "system"),
+-                reason=params.get("reason", ""),
+-            )
+-            return make_response(result)
+-        except Exception as exc:
+-            tb = traceback.format_exc()
+-            print(f"[reject_memory] {tb}", file=sys.stderr)
+-            return make_error_response("reject_error", str(exc))
++        from .reject_memory import handle
++        return handle(self.ctx, params)
+ 
+     def deprecate_memory(self, params: dict) -> dict:
+-        memory_id = params.get("memory_id", "")
+-        if not memory_id:
+-            return make_error_response("invalid_params", "memory_id 是必填参数")
+-
+-        try:
+-            result = self.ctx.governance.deprecate_memory(
+-                memory_id=memory_id,
+-                reason=params.get("reason", ""),
+-                actor=params.get("actor", "mcp-agent"),
+-            )
+-            return make_response(result)
+-        except Exception as exc:
+-            tb = traceback.format_exc()
+-            print(f"[deprecate_memory] {tb}", file=sys.stderr)
+-            return make_error_response("deprecate_error", str(exc))
++        from .deprecate_memory import handle
++        return handle(self.ctx, params)
+diff --git a/src/project_memory_mcp/tools/list_memories.py b/src/project_memory_mcp/tools/list_memories.py
+index 83dbdf4..f927e39 100644
+--- a/src/project_memory_mcp/tools/list_memories.py
++++ b/src/project_memory_mcp/tools/list_memories.py
+@@ -1,3 +1,40 @@
+-"""list_memories 工具 — 列出项目知识条目。"""
++"""list_memories — 列出项目知识条目。"""
+ 
+-# TODO: 阶段 5 实现
++from .handlers import make_response, make_error_response
++
++
++def handle(ctx, params: dict) -> dict:
++    project_id = params.get("project_id", "")
++    if not project_id:
++        return make_error_response("invalid_params", "project_id 是必填参数")
++
++    if ctx.config_loader.get_project(project_id) is None:
++        return make_error_response("project_not_found", f"项目 {project_id} 不存在")
++
++    status_filter = params.get("status_filter")
++    if status_filter and isinstance(status_filter, str):
++        status_filter = [s.strip() for s in status_filter.split(",") if s.strip()]
++
++    items = ctx.memory_repo.list_memories(
++        project_id=project_id,
++        status_filter=status_filter or None,
++        type_filter=params.get("type") or None,
++        module_filter=params.get("module") or None,
++        tag_filter=params.get("tag") or None,
++        limit=min(params.get("limit", 50), 100),
++        offset=params.get("offset", 0),
++    )
++    return make_response({
++        "memories": [
++            {
++                "id": m.id, "title": m.title, "type": m.type,
++                "module": m.module, "status": m.status,
++                "index_status": m.index_status, "risk_level": m.risk_level,
++                "confidence": m.confidence, "scope": m.scope,
++                "tags": m.tags, "created_at": m.created_at,
++                "updated_at": m.updated_at,
++            }
++            for m in items
++        ],
++        "total": len(items),
++    })
+diff --git a/src/project_memory_mcp/tools/list_projects.py b/src/project_memory_mcp/tools/list_projects.py
+index 3b468b4..44d9c32 100644
+--- a/src/project_memory_mcp/tools/list_projects.py
++++ b/src/project_memory_mcp/tools/list_projects.py
+@@ -1,3 +1,24 @@
+-"""list_projects 工具 — 返回已配置项目列表。"""
++"""list_projects — 列出可用项目。"""
+ 
+-# TODO: 阶段 5 实现
++from .handlers import make_response
++
++
++def handle(ctx, params: dict) -> dict:
++    status_filter = params.get("status_filter", "active")
++    loader = ctx.config_loader
++    if status_filter == "active":
++        projects = loader.list_active_projects()
++    else:
++        projects = loader.load_all_projects()
++        if status_filter:
++            projects = [p for p in projects if p.status == status_filter]
++
++    project_list = []
++    for p in projects:
++        profile = ctx.profile_builder.build(p.id)
++        stats = profile.get("stats", {}) if profile else {}
++        project_list.append({
++            "id": p.id, "name": p.name, "slug": p.slug,
++            "status": p.status, "memory_count": stats.get("total_memories", 0),
++        })
++    return make_response({"projects": project_list, "total": len(project_list)})
+diff --git a/src/project_memory_mcp/tools/propose_memory.py b/src/project_memory_mcp/tools/propose_memory.py
+index f52a38d..ac479d9 100644
+--- a/src/project_memory_mcp/tools/propose_memory.py
++++ b/src/project_memory_mcp/tools/propose_memory.py
+@@ -1,3 +1,57 @@
+-"""propose_memory 工具 — 提交候选知识。"""
++"""propose_memory — 提交候选知识，走完整治理流水线。"""
+ 
+-# TODO: 阶段 5 实现
++import traceback
++import sys
++from .handlers import make_response, make_error_response, resolve_project_or_error
++
++
++def handle(ctx, params: dict) -> dict:
++    project_id = params.get("project_id")
++    workspace_path = params.get("workspace_path")
++    changed_files = params.get("changed_files")
++
++    if not project_id and (workspace_path or changed_files or params.get("related_files") or params.get("task_description")):
++        project, error = resolve_project_or_error(
++            ctx,
++            workspace_path=workspace_path,
++            changed_files=changed_files,
++            related_files=params.get("related_files"),
++            task_description=params.get("task_description"),
++        )
++        if error:
++            return error
++        project_id = project.id
++
++    if not project_id:
++        return make_error_response("project_id_required", "请提供 project_id、workspace_path 或 changed_files")
++
++    project_cfg = ctx.config_loader.get_project(project_id)
++    if project_cfg is None:
++        return make_error_response("project_not_found", f"项目 {project_id} 不存在")
++
++    try:
++        result = ctx.governance.propose_memory(
++            title=params.get("title", ""),
++            content=params.get("content", ""),
++            project=project_cfg,
++            knowledge_type=params.get("type", "other"),
++            module=params.get("module", ""),
++            tags=params.get("tags"),
++            confidence=params.get("confidence", 0.5),
++            source_type=params.get("source_type", "ai_inferred"),
++            source_evidence=params.get("source_evidence"),
++            source_file=params.get("source_file"),
++            source_line=params.get("source_line"),
++            scope=params.get("scope", "project"),
++            allowed_projects=params.get("allowed_projects"),
++            actor=params.get("actor", "mcp-agent"),
++            task_id=params.get("task_id"),
++        )
++        return make_response(result)
++    except Exception as exc:
++        if "GovernanceError" in type(exc).__name__ or "tags" in str(exc).lower():
++            print(f"[propose_memory] {type(exc).__name__}: {exc}", file=sys.stderr)
++            return make_error_response("invalid_params", str(exc))
++        tb = traceback.format_exc()
++        print(f"[propose_memory] {tb}", file=sys.stderr)
++        return make_error_response("propose_error", str(exc))
+diff --git a/src/project_memory_mcp/tools/reject_memory.py b/src/project_memory_mcp/tools/reject_memory.py
+index d3715c1..3f4064c 100644
+--- a/src/project_memory_mcp/tools/reject_memory.py
++++ b/src/project_memory_mcp/tools/reject_memory.py
+@@ -1,3 +1,28 @@
+-"""reject_memory 工具 — 审核拒绝候选知识。"""
++"""reject_memory — 审核拒绝候选知识。"""
+ 
+-# TODO: 阶段 5 实现
++import traceback
++import sys
++from .handlers import make_response, make_error_response
++
++
++def handle(ctx, params: dict) -> dict:
++    memory_id = params.get("memory_id", "")
++    if not memory_id:
++        return make_error_response("invalid_params", "memory_id 是必填参数")
++
++    try:
++        result = ctx.governance.reject_memory(
++            memory_id=memory_id,
++            reviewer=params.get("reviewer", "system"),
++            reason=params.get("reason", ""),
++        )
++        return make_response(result)
++    except Exception as exc:
++        name = type(exc).__name__
++        if "GovernanceError" in name:
++            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++            print(f"[reject_memory] {name}: {exc}", file=sys.stderr)
++            return make_error_response(code, str(exc))
++        tb = traceback.format_exc()
++        print(f"[reject_memory] {tb}", file=sys.stderr)
++        return make_error_response("governance_error", str(exc))
+diff --git a/src/project_memory_mcp/tools/resolve_project.py b/src/project_memory_mcp/tools/resolve_project.py
+index aeff180..a2fe588 100644
+--- a/src/project_memory_mcp/tools/resolve_project.py
++++ b/src/project_memory_mcp/tools/resolve_project.py
+@@ -1,3 +1,28 @@
+-"""resolve_project 工具 — 多策略项目识别。"""
++"""resolve_project — 多策略项目识别。"""
+ 
+-# TODO: 阶段 5 实现
++from .handlers import make_response, resolve_project_or_error
++
++
++def handle(ctx, params: dict) -> dict:
++    project, error = resolve_project_or_error(
++        ctx,
++        project_id=params.get("project_id"),
++        workspace_path=params.get("workspace_path"),
++        changed_files=params.get("changed_files"),
++        related_files=params.get("related_files"),
++        task_description=params.get("task_description"),
++    )
++    if error:
++        return error
++
++    return make_response({
++        "resolved": True,
++        "ambiguous": False,
++        "project": {
++            "id": project.id, "name": project.name,
++            "slug": project.slug, "status": project.status,
++        },
++        "match_method": params.get("project_id") and "explicit" or "inferred",
++        "confidence": 0.95 if params.get("project_id") else 0.5,
++        "warnings": [],
++    })
+diff --git a/src/project_memory_mcp/tools/search_context.py b/src/project_memory_mcp/tools/search_context.py
+index f9afae5..41266c9 100644
+--- a/src/project_memory_mcp/tools/search_context.py
++++ b/src/project_memory_mcp/tools/search_context.py
+@@ -1,3 +1,53 @@
+-"""search_project_context 工具 — 三级范围检索，返回 context_pack 格式。"""
++"""search_project_context — 检索项目上下文，返回 context_pack。"""
+ 
+-# TODO: 阶段 5 实现
++import traceback
++import sys
++from .handlers import make_response, make_error_response, resolve_project_or_error
++
++
++def handle(ctx, params: dict) -> dict:
++    project_id = params.get("project_id")
++    workspace_path = params.get("workspace_path")
++    changed_files = params.get("changed_files")
++
++    if not project_id and (workspace_path or changed_files or params.get("related_files") or params.get("task_description")):
++        project, error = resolve_project_or_error(
++            ctx,
++            workspace_path=workspace_path,
++            changed_files=changed_files,
++            related_files=params.get("related_files"),
++            task_description=params.get("task_description"),
++        )
++        if error:
++            return error
++        project_id = project.id
++
++    if not project_id:
++        return make_error_response("project_id_required", "请提供 project_id、workspace_path 或 changed_files")
++
++    if ctx.config_loader.get_project(project_id) is None:
++        return make_error_response("project_not_found", f"项目 {project_id} 不存在")
++
++    try:
++        result_set = ctx.search_service.search(
++            project_id=project_id,
++            query=params.get("query", ""),
++            modules=params.get("modules") or None,
++            types=params.get("types") or None,
++            tags=params.get("tags") or None,
++            max_results=params.get("max_results", 10),
++            min_confidence=params.get("min_confidence"),
++            include_shared=params.get("include_shared", True),
++            include_global=params.get("include_global", True),
++            include_candidates=params.get("include_candidates", False),
++        )
++        return make_response({
++            "query": params.get("query", ""),
++            "project_id": project_id,
++            "context_pack": result_set.context_pack,
++            "total_found": result_set.total_found,
++        })
++    except Exception as exc:
++        tb = traceback.format_exc()
++        print(f"[search_project_context] {tb}", file=sys.stderr)
++        return make_error_response("search_error", str(exc))
+diff --git a/tests/test_mcp_tools.py b/tests/test_mcp_tools.py
+index 096b384..62be67c 100644
+--- a/tests/test_mcp_tools.py
++++ b/tests/test_mcp_tools.py
+@@ -222,7 +222,7 @@ def test_approve_memory(handler):
+ def test_approve_invalid_memory(handler):
+     r = handler.approve_memory({"memory_id": "nonexistent"})
+     assert r["ok"] is False
+-    assert r["error"]["code"] == "approve_error"
++    assert r["error"]["code"] == "memory_not_found"
+ 
+ 
+ # ── 8. reject_memory ─────────────────────────────────────────
+@@ -289,7 +289,7 @@ def test_tags_non_string_returns_error(handler):
+         "actor": "test",
+     })
+     assert r["ok"] is False
+-    assert r["error"]["code"] == "propose_error"
++    assert r["error"]["code"] == "invalid_params"
+ 
+ 
+ def test_no_traceback_in_error(handler):

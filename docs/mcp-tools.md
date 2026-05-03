@@ -16,15 +16,39 @@ MVP 阶段提供 9 个 MCP 工具，通过 stdio JSON-RPC 暴露给 MCP 客户�
 2. 其次使用 `changed_files` 自动 resolve
 3. 都失败时返回 `project_id_required` 错误
 
+### 成功响应格式
+
+```json
+{
+    "ok": true,
+    "data": {}
+}
+```
+
 ### 错误响应格式
 
 ```json
 {
-    "error": "error_code",
-    "message": "人类可读的错误描述",
-    "details": {}
+    "ok": false,
+    "error": {
+        "code": "error_code",
+        "message": "人类可读的错误描述",
+        "details": {}
+    }
 }
 ```
+
+常见错误码：
+
+| code | 说明 |
+|------|------|
+| `project_id_required` | 需要提供 project_id/workspace_path/changed_files |
+| `project_not_found` | 项目不存在 |
+| `ambiguous_project` | 多个项目匹配 |
+| `invalid_params` | 参数错误 |
+| `memory_not_found` | 知识条目不存在 |
+| `invalid_state` | 状态不合法 |
+| `governance_error` | 治理操作错误 |
 
 ### 敏感操作审计
 

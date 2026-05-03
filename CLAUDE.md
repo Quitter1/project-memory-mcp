@@ -144,7 +144,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 5 — MCP 工具实现（9 tools + server.py + AppContext + ToolHandler + 集成测试）。
+当前阶段：阶段 6 — 端到端集成测试（多项目隔离/安全闭环/MCP 格式/demo 数据/dev_check）。
 
 ### changed_files 路径规则
 

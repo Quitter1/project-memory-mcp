@@ -1,10 +1,11 @@
 """
-开发测试客户端 — 直接调用 ToolHandler，模拟 MCP client 行为。
+ToolHandler 级调试客户端 — 直接调用 ToolHandler，不是真实 MCP stdio 客户端。
 
 用于人工调试 9 个 MCP tools 的功能正确性。
+真实 MCP stdio 测试后续 Phase 6 再实现。
 
 使用：
-    python sandbox/test_mcp_client.py
+    python sandbox/test_tool_handler_client.py
 """
 
 import json

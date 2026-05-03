@@ -1,0 +1,36 @@
+On branch master
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	renamed:    sandbox/test_mcp_client.py -> sandbox/test_tool_handler_client.py
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   CLAUDE.md
+	modified:   README.md
+	modified:   scripts/make_review_pack.py
+	modified:   src/project_memory_mcp/app_context.py
+	modified:   src/project_memory_mcp/server.py
+	modified:   src/project_memory_mcp/tools/approve_memory.py
+	modified:   src/project_memory_mcp/tools/deprecate_memory.py
+	modified:   src/project_memory_mcp/tools/get_project_profile.py
+	modified:   src/project_memory_mcp/tools/handlers.py
+	modified:   src/project_memory_mcp/tools/list_memories.py
+	modified:   src/project_memory_mcp/tools/list_projects.py
+	modified:   src/project_memory_mcp/tools/propose_memory.py
+	modified:   src/project_memory_mcp/tools/reject_memory.py
+	modified:   src/project_memory_mcp/tools/resolve_project.py
+	modified:   src/project_memory_mcp/tools/search_context.py
+	modified:   tests/test_mcp_tools.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	progress/git-diff-phase-51.patch
+	progress/git-status-phase-51.txt
+	progress/phase-51-summary.md
+	progress/phase-52-summary.md
+	progress/test-output-phase-51.txt
+	progress/tree-phase-51.txt
+	progress/tree-phase-52.txt
+	tests/test_mcp_server.py
+

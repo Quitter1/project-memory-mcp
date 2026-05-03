@@ -94,7 +94,7 @@ class AppContext:
     def sync_projects(self) -> int:
         """将 projects.yml 同步到 SQLite。返回同步数量。"""
         result = self.project_manager.sync_from_yaml()
-        return result.get("synced", 0)
+        return result.get("created", 0) + result.get("updated", 0)
 
     @classmethod
     def create_for_test(cls, config_dir: Path, db_path: Path) -> "AppContext":
