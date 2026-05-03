@@ -78,8 +78,13 @@ class RuleBasedReviewer(ReviewerBase):
         source_type = item.get("source_type", SourceType.AI_INFERRED)
         knowledge_type = item.get("type", "other")
 
-        # === 条件 1: confidence >= threshold ===
+        # === 条件 1: threshold >= 0 且 confidence >= threshold ===
         threshold = kp.auto_approve_threshold
+        if threshold < 0:
+            return ReviewDecision(
+                auto_approved=False,
+                reason=f"auto_approve_threshold ({threshold}) < 0，项目禁用自动批准",
+            )
         if confidence < threshold:
             return ReviewDecision(
                 auto_approved=False,

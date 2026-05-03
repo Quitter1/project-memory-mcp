@@ -37,13 +37,14 @@ class ContentValidator:
 
     AWS_AKIA_RE = re.compile(r"AKIA[0-9A-Z]{16}")
 
-    PLAINTEXT_PASSWORD_RE = re.compile(
-        r"""password\s*[:=]\s*['"](?!\s*\$\{)[^'"]{6,}['"]""",
+    JDBC_PASSWORD_RE = re.compile(
+        r"jdbc:[a-z]+://[^\s]*password=[^&\s]+",
         re.IGNORECASE,
     )
 
-    JDBC_PASSWORD_RE = re.compile(
-        r"jdbc:[a-z]+://[^\s]*password=[^&\s]+",
+    # Phase 4.2: 同时支持引号和无引号，排除 ${} 占位符
+    PLAINTEXT_PASSWORD_RE = re.compile(
+        r"""password\s*[:=]\s*(?:['"](?!\s*\$\{)[^'"]{6,}['"]|(?!\$\{)[^\s'"&;]{6,})""",
         re.IGNORECASE,
     )
 
@@ -71,6 +72,11 @@ class ContentValidator:
         r"""sk-[a-z0-9]{32,}""",
     )
 
+    # Phase 4.3: 裸 sk- key（混合大小写，不在上面特定厂商规则中命中）
+    BARE_SK_KEY_RE = re.compile(
+        r"""sk-[A-Za-z0-9_-]{20,}""",
+    )
+
     SECRET_ASSIGN_RE = re.compile(
         r"""(?:secret|secret_key|private_key)\s*[:=]\s*['"]?[\w\-/+=]{20,}['"]?""",
         re.IGNORECASE,
@@ -81,8 +87,9 @@ class ContentValidator:
         re.IGNORECASE,
     )
 
+    # Phase 4.2: 同时支持引号和无引号，排除 ${} 占位符
     PWD_ASSIGN_RE = re.compile(
-        r"""\bpwd\s*[:=]\s*['"][^'"]{4,}['"]""",
+        r"""\bpwd\s*[:=]\s*(?:['"](?!\s*\$\{)[^'"]{4,}['"]|(?!\$\{)[^\s'"&;]{4,})""",
         re.IGNORECASE,
     )
 
@@ -100,8 +107,10 @@ class ContentValidator:
         (OPENAI_KEY_RE, "OpenAI API Key (sk-...)"),
         (ANTHROPIC_KEY_RE, "Anthropic API Key (sk-ant-...)"),
         (DEEPSEEK_KEY_RE, "DeepSeek API Key (sk-...)"),
-        (PLAINTEXT_PASSWORD_RE, "明文数据库密码 (password=...)"),
+        # Phase 4.3: 裸 sk-（混合大小写，不在上面特定厂商规则命中时兜底）
+        (BARE_SK_KEY_RE, "疑似 API Key (sk-...)"),
         (JDBC_PASSWORD_RE, "JDBC URL 含明文密码"),
+        (PLAINTEXT_PASSWORD_RE, "明文数据库密码 (password=...)"),
         # Phase 4.1: 从 warning 升级
         (API_KEY_ASSIGN_RE, "API Key 赋值"),
         (TOKEN_ASSIGN_RE, "Token 赋值"),
@@ -193,10 +202,7 @@ class ContentValidator:
             checks.append(("source_file", source_file))
 
         if source_evidence:
-            for key in ("excerpt", "reasoning", "file"):
-                val = source_evidence.get(key)
-                if val and isinstance(val, str):
-                    checks.append((f"source_evidence.{key}", val))
+            checks.extend(self._walk_source_evidence(source_evidence, "source_evidence"))
 
         if tags:
             for i, tag in enumerate(tags):
@@ -216,3 +222,53 @@ class ContentValidator:
             final_result.warnings.extend(result.warnings)
 
         return final_result
+
+    # ── 递归扫描 source_evidence ───────────────────────────────────
+
+    # Phase 4.3: key 路径使用 $ 前缀区分（$key vs .value）
+    KEY_PATH_SEP = "$"
+
+    def _walk_source_evidence(
+        self, obj, prefix: str
+    ) -> list[tuple[str, str]]:
+        """
+        递归遍历 source_evidence 中所有字符串值 + 所有 dict key。
+
+        返回 [(field_path, text), ...]。
+        value 路径: source_evidence.nested.raw
+        key 路径:   source_evidence.$keyName（Phase 4.3 新增）
+        list 路径:  source_evidence.items[0].context
+        """
+        results: list[tuple[str, str]] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                val_path = f"{prefix}.{key}"
+                # Phase 4.3: dict key 也参与敏感信息扫描
+                if isinstance(key, str):
+                    key_path = f"{prefix}.{self.KEY_PATH_SEP}{key}"
+                    results.append((key_path, key))
+                if isinstance(value, str):
+                    results.append((val_path, value))
+                elif isinstance(value, dict):
+                    results.extend(self._walk_source_evidence(value, val_path))
+                elif isinstance(value, list):
+                    results.extend(self._walk_source_evidence(value, val_path))
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                idx_path = f"{prefix}[{i}]"
+                if isinstance(item, str):
+                    results.append((idx_path, item))
+                elif isinstance(item, dict):
+                    # Phase 4.3: list 内 dict 的 key 也扫描
+                    for key, value in item.items():
+                        if isinstance(key, str):
+                            key_path = f"{idx_path}.{self.KEY_PATH_SEP}{key}"
+                            results.append((key_path, key))
+                        val_path = f"{idx_path}.{key}"
+                        if isinstance(value, str):
+                            results.append((val_path, value))
+                        elif isinstance(value, (dict, list)):
+                            results.extend(self._walk_source_evidence(value, val_path))
+                elif isinstance(item, list):
+                    results.extend(self._walk_source_evidence(item, idx_path))
+        return results

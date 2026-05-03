@@ -334,6 +334,9 @@ class TestReviewer:
             id="test",
             name="test",
             slug="test",
+            knowledge_policy=KnowledgePolicyConfig(
+                auto_approve_threshold=0.7,
+            ),
             review_policy=ReviewPolicyConfig(
                 allow_ai_auto_approve=True,
                 forbidden_auto_types=["business_rule"],
@@ -412,6 +415,82 @@ class TestReviewer:
         decision = reviewer.review(item, auto_approve_project_config)
         assert decision.auto_approved is False
         assert "可信来源" in decision.reason
+
+    # ── Phase 4.2: auto_approve_threshold=-1 禁用自动批准 ──
+
+    def test_29_threshold_neg1_user_confirmed_no_auto(self, reviewer):
+        """threshold=-1 + user_confirmed + high confidence → 不自动批准。"""
+        config = ProjectConfig(
+            id="test",
+            name="test",
+            slug="test",
+            knowledge_policy=KnowledgePolicyConfig(auto_approve_threshold=-1),
+        )
+        item = {
+            "confidence": 0.95,
+            "scope": "project",
+            "risk_level": "low",
+            "source_type": "user_confirmed",
+            "type": "architecture",
+        }
+        decision = reviewer.review(item, config)
+        assert decision.auto_approved is False
+        assert "auto_approve_threshold" in decision.reason
+
+    def test_30_threshold_neg1_manual_input_no_auto(self, reviewer):
+        """threshold=-1 + manual_input + high confidence → 不自动批准。"""
+        config = ProjectConfig(
+            id="test",
+            name="test",
+            slug="test",
+            knowledge_policy=KnowledgePolicyConfig(auto_approve_threshold=-1),
+        )
+        item = {
+            "confidence": 0.95,
+            "scope": "project",
+            "risk_level": "low",
+            "source_type": "manual_input",
+            "type": "architecture",
+        }
+        decision = reviewer.review(item, config)
+        assert decision.auto_approved is False
+
+    def test_31_threshold_08_manual_input_conf09_auto(self, reviewer):
+        """threshold=0.8 + manual_input + confidence=0.9 → 自动批准。"""
+        config = ProjectConfig(
+            id="test",
+            name="test",
+            slug="test",
+            knowledge_policy=KnowledgePolicyConfig(auto_approve_threshold=0.8),
+        )
+        item = {
+            "confidence": 0.9,
+            "scope": "project",
+            "risk_level": "low",
+            "source_type": "manual_input",
+            "type": "architecture",
+        }
+        decision = reviewer.review(item, config)
+        assert decision.auto_approved is True
+
+    def test_32_threshold_08_manual_input_conf07_no_auto(self, reviewer):
+        """threshold=0.8 + manual_input + confidence=0.7 → 不自动批准。"""
+        config = ProjectConfig(
+            id="test",
+            name="test",
+            slug="test",
+            knowledge_policy=KnowledgePolicyConfig(auto_approve_threshold=0.8),
+        )
+        item = {
+            "confidence": 0.7,
+            "scope": "project",
+            "risk_level": "low",
+            "source_type": "manual_input",
+            "type": "architecture",
+        }
+        decision = reviewer.review(item, config)
+        assert decision.auto_approved is False
+        assert "confidence" in decision.reason
 
 
 # ==================================================================
@@ -791,6 +870,220 @@ class TestGovernancePropose:
         assert result["status"] == "approved"
         assert result["review_decision"]["auto_approved"] is True
 
+    # ── Phase 4.2: threshold=-1 禁用集成测试 ──
+
+    def test_44_threshold_neg1_propose_pending_review(
+        self, governance, project_repo,
+    ):
+        """threshold=-1 的 project，即使 user_confirmed+high confidence 也 pending_review。"""
+        config = ProjectConfig(
+            id="neg1-project",
+            name="禁用自动批准项目",
+            slug="neg1-project",
+            status="active",
+            recognition=RecognitionConfig(root_paths=["/neg1"], aliases=["neg1"]),
+            knowledge_policy=KnowledgePolicyConfig(auto_approve_threshold=-1),
+        )
+        _seed_project(project_repo, config)
+        result = governance.propose_memory(
+            title="任何知识",
+            content="即使高置信度用户确认也强制人工审核",
+            project=config,
+            confidence=0.99,
+            source_type="user_confirmed",
+            actor="test",
+        )
+        assert result["status"] == "pending_review"
+        assert result["review_decision"]["auto_approved"] is False
+        assert "auto_approve_threshold" in result["review_decision"]["reason"]
+
+    # ── Phase 4.2: blocked audit_log 安全摘要 ──
+
+    def test_45_source_file_with_api_key_blocked(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """source_file 含 API key → blocked。"""
+        _seed_project(project_repo, project_config)
+        result = governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_file='api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
+            actor="test",
+        )
+        assert result["status"] == "rejected"
+        assert result["validation"]["blocked"] is True
+
+    def test_46_audit_log_no_api_key(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked audit_log 不包含 API key 原始值。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_file='api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in new_value
+
+    def test_47_audit_log_no_raw_source_file(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked 时（由 content 触发），audit_log 不包含 source_file 原始值。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="-----BEGIN RSA PRIVATE KEY-----\nblocked content",
+            project=project_config,
+            source_file="/etc/secrets/passwords.txt",
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "/etc/secrets/passwords.txt" not in new_value
+        assert "source_file_present" in new_value
+
+    def test_48_audit_log_tag_with_token_no_leak(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """tags 含 token 被 blocked，audit_log 不包含原始 tag。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            tags=["order", "token=ghp_abcdefghijklmnopqrstuvwxyz"],
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "ghp_abcdefghijklmnopqrstuvwxyz" not in new_value
+        assert "token=" not in new_value
+
+    def test_49_audit_log_title_with_api_key_no_leak(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """title 含 API key 被 blocked，audit_log 不包含 title 原文。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title='API Key = "sk-abcdefghijklmnopqrstuvwxyz123456" 泄露',
+            content="安全的正文",
+            project=project_config,
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in new_value
+        assert "泄露" not in new_value
+
+    # ── Phase 4.3: source_evidence key 审计 ──
+
+    def test_50_source_evidence_key_with_api_key_blocked(
+        self, governance, project_repo, project_config,
+    ):
+        """source_evidence 的 key 含 API key → blocked。"""
+        _seed_project(project_repo, project_config)
+        result = governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+            actor="test",
+        )
+        assert result["status"] == "rejected"
+        assert result["validation"]["blocked"] is True
+        assert "$OPENAI_API_KEY" in result["validation"]["blocked_field"]
+
+    def test_51_audit_no_raw_key_text(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked audit_log 不包含 source_evidence key 原文。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "OPENAI_API_KEY" not in new_value
+
+    def test_52_audit_no_sk_in_log(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked audit_log 不包含 sk-... 敏感值。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="安全的正文",
+            project=project_config,
+            source_evidence={
+                "api-key-sk-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in new_value
+
+    def test_53_audit_has_source_evidence_present(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked audit_log 包含 source_evidence_present（非 raw key）。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="-----BEGIN RSA PRIVATE KEY-----\nblocked content",
+            project=project_config,
+            source_evidence={"config": "some_value"},
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "source_evidence_present" in new_value
+
+    def test_54_audit_has_source_evidence_key_count(
+        self, governance, project_repo, project_config, audit_repo,
+    ):
+        """blocked audit_log 包含 source_evidence_key_count。"""
+        _seed_project(project_repo, project_config)
+        governance.propose_memory(
+            title="安全的标题",
+            content="-----BEGIN RSA PRIVATE KEY-----\nblocked content",
+            project=project_config,
+            source_evidence={"a": "1", "b": "2", "c": "3"},
+            actor="test",
+        )
+        logs = audit_repo.list_by_project_id(project_config.id)
+        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
+        assert len(blocked_logs) >= 1
+        new_value = blocked_logs[0].get("new_value") or ""
+        assert "source_evidence_key_count" in new_value
+
 
 class TestGovernanceApproveReject:
     """approve/reject/deprecate 操作测试。"""
@@ -972,3 +1265,33 @@ class TestGovernanceApproveReject:
         )
         with pytest.raises(GovernanceError, match="不可审核"):
             governance.reject_memory(memory_id=item.id, reason="再次拒绝")
+
+    # ── Phase 4.3: tags 类型校验 ──
+
+    def test_58_tags_with_non_string_raises(
+        self, governance, project_config,
+    ):
+        """tags 中包含非字符串元素 → GovernanceError。"""
+        with pytest.raises(GovernanceError, match="tags 必须是字符串列表"):
+            governance.propose_memory(
+                title="test",
+                content="safe content",
+                project=project_config,
+                tags=["ok", 123],
+            )
+
+    def test_59_tags_all_strings_ok(
+        self, governance, project_repo, project_config,
+    ):
+        """全字符串 tags 正常通过。"""
+        _seed_project(project_repo, project_config)
+        result = governance.propose_memory(
+            title="test",
+            content="safe content",
+            project=project_config,
+            tags=["order", "transaction"],
+            confidence=0.9,
+            source_type="user_confirmed",
+            actor="test",
+        )
+        assert result["status"] in ("approved", "pending_review")

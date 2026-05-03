@@ -140,6 +140,56 @@ MIICXAIBAAKBgQC...
         assert result.blocked is True
         assert "pwd" in result.blocked_reason.lower() or "密码" in result.blocked_reason
 
+    # ── Phase 4.2: 无引号 password/pwd blocked ──
+
+    def test_17_password_unquoted_blocked(self, validator):
+        result = validator.validate("database password=secret123 config")
+        assert result.passed is False
+        assert result.blocked is True
+
+    def test_18_password_colon_unquoted_blocked(self, validator):
+        result = validator.validate("db connection password: secret123")
+        assert result.passed is False
+        assert result.blocked is True
+
+    def test_19_pwd_unquoted_blocked(self, validator):
+        result = validator.validate("db pwd=secret123 config")
+        assert result.passed is False
+        assert result.blocked is True
+
+    def test_20_pwd_colon_unquoted_blocked(self, validator):
+        result = validator.validate("db connection pwd: secret123")
+        assert result.passed is False
+        assert result.blocked is True
+
+    def test_21_password_placeholder_not_blocked(self, validator):
+        result = validator.validate("database password=${DB_PASSWORD}")
+        assert result.blocked is False
+
+    def test_22_pwd_placeholder_not_blocked(self, validator):
+        result = validator.validate("db pwd=${DB_PASSWORD}")
+        assert result.blocked is False
+
+    def test_23_password_quoted_placeholder_not_blocked(self, validator):
+        result = validator.validate('database password="${DB_PASSWORD}"')
+        assert result.blocked is False
+
+    def test_24_pwd_quoted_placeholder_not_blocked(self, validator):
+        result = validator.validate('db pwd="${DB_PASSWORD}"')
+        assert result.blocked is False
+
+    # ── Phase 4.3: 裸 sk- 混合大小写检测 ──
+
+    def test_25_bare_sk_mixed_case_blocked(self, validator):
+        result = validator.validate("default key: sk-abcDEF1234567890abcDEF1234567890")
+        assert result.blocked is True
+
+    def test_26_api_key_equals_sk_mixed_blocked(self, validator):
+        result = validator.validate(
+            "OPENAI_API_KEY=sk-abcDEF1234567890abcDEF1234567890 in config"
+        )
+        assert result.blocked is True
+
 
 # ==================================================================
 # Warning 级别 — Phase 4.1: 仅保留大段源码/大段 SQL
@@ -269,3 +319,101 @@ class TestPersistedPayload:
         )
         assert result.blocked is True
         assert "source_file" in result.blocked_field
+
+    # ── Phase 4.2: 递归扫描 source_evidence ──
+
+    def test_27_snippet_with_api_key_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "snippet": 'OPENAI_API_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz123456"',
+            },
+        )
+        assert result.blocked is True
+        assert "source_evidence.snippet" in result.blocked_field
+
+    def test_28_nested_raw_with_token_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "result": {
+                    "nested": {
+                        "raw": "token=ghp_abcdefghijklmnopqrstuvwxyz",
+                    },
+                },
+            },
+        )
+        assert result.blocked is True
+        assert "source_evidence.result.nested.raw" in result.blocked_field
+
+    def test_29_items_context_with_password_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "items": [
+                    {"context": "password=secret123"},
+                ],
+            },
+        )
+        assert result.blocked is True
+        assert "source_evidence.items[0].context" in result.blocked_field
+
+    def test_30_recursive_blocked_field_path(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "deep": {
+                    "list": [
+                        {"key": "safe"},
+                        {"secret": 'api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'},
+                    ],
+                },
+            },
+        )
+        assert result.blocked is True
+        assert "source_evidence.deep.list[1].secret" in result.blocked_field
+
+    # ── Phase 4.3: source_evidence key 也扫描 ──
+
+    def test_31_top_level_key_with_api_key_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456": "safe",
+            },
+        )
+        assert result.blocked is True
+        assert "$OPENAI_API_KEY" in result.blocked_field
+
+    def test_32_nested_key_with_token_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "nested": {
+                    "token=ghp_abcdefghijklmnopqrstuvwxyz": "safe",
+                },
+            },
+        )
+        assert result.blocked is True
+        assert "$token" in result.blocked_field
+        assert "nested" in result.blocked_field
+
+    def test_33_list_dict_key_with_password_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文",
+            source_evidence={
+                "items": [
+                    {"password=secret123": "safe"},
+                ],
+            },
+        )
+        assert result.blocked is True
+        assert "$password" in result.blocked_field
+        assert "items[0]" in result.blocked_field

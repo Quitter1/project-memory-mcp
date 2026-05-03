@@ -89,6 +89,9 @@ class KnowledgeGovernance:
             raise GovernanceError("content 不能为空")
         if not project or not project.id:
             raise GovernanceError("project 不能为空")
+        if tags is not None:
+            if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+                raise GovernanceError("tags 必须是字符串列表")
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -103,17 +106,20 @@ class KnowledgeGovernance:
 
         if validation.blocked:
             # 不保存原文，仅写 audit_log（安全摘要，不含原始敏感内容）
+            # Phase 4.2: 仅保存安全元信息，不含任何原始字符串值
             safe_summary = json.dumps(
                 {
                     "title_present": bool(title and title.strip()),
                     "content_length": len(content) if content else 0,
+                    "source_file_present": bool(source_file),
+                    "source_evidence_present": bool(source_evidence),
+                    "source_evidence_key_count": len(source_evidence) if source_evidence else 0,
+                    "tag_count": len(tags) if tags else 0,
                     "blocked_reason": validation.blocked_reason,
                     "blocked_field": validation.blocked_field,
                     "type": knowledge_type,
                     "module": module,
                     "source_type": source_type,
-                    "source_file": source_file,
-                    "source_line": source_line,
                     "scope": scope,
                 },
                 ensure_ascii=False,
