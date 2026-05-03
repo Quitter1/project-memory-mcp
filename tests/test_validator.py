@@ -1,4 +1,8 @@
-"""ContentValidator 测试 — blocked/warning 两级检测。"""
+"""ContentValidator 测试 — blocked/warning 两级检测 + 全字段校验。
+
+Phase 4.1 更新：API Key/Token/Secret/Bearer 从 warning 升级为 blocked，
+新增 OpenAI/Anthropic/DeepSeek Key、pwd 检测、validate_persisted_payload。
+"""
 
 import pytest
 
@@ -10,9 +14,9 @@ def validator():
     return ContentValidator()
 
 
-# ------------------------------------------------------------------
-# Blocked 级别
-# ------------------------------------------------------------------
+# ==================================================================
+# Blocked 级别 — Phase 4.1 强化
+# ==================================================================
 
 class TestBlocked:
     """blocked 级别 — 不保存原文。"""
@@ -32,6 +36,7 @@ MIICXAIBAAKBgQC...
         assert result.passed is False
         assert result.blocked is True
         assert "私钥" in result.blocked_reason
+        assert result.blocked_field == "content"
 
     def test_03_aws_akia_blocked(self, validator):
         result = validator.validate("AWS key: AKIA1234567890ABCDEF with secret")
@@ -68,51 +73,103 @@ MIICXAIBAAKBgQC...
         result = validator.validate(content)
         assert result.blocked is True
 
+    # ── Phase 4.1: 从 warning 升级为 blocked ──
 
-# ------------------------------------------------------------------
-# Warning 级别
-# ------------------------------------------------------------------
+    def test_09_api_key_blocked(self, validator):
+        result = validator.validate(
+            'api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert result.blocked_field == "content"
+        assert "API Key" in result.blocked_reason
+
+    def test_10_token_blocked(self, validator):
+        result = validator.validate(
+            'token = "ghp_abcdefghijklmnopqrstuvwxyz"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "Token" in result.blocked_reason
+
+    # ── Phase 4.1 新增 blocked 规则 ──
+
+    def test_11_openai_key_blocked(self, validator):
+        result = validator.validate(
+            'OPENAI_API_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "OpenAI" in result.blocked_reason
+
+    def test_12_anthropic_key_blocked(self, validator):
+        result = validator.validate(
+            'ANTHROPIC_API_KEY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "Anthropic" in result.blocked_reason
+
+    def test_13_deepseek_key_blocked(self, validator):
+        result = validator.validate(
+            'DEEPSEEK_API_KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "DeepSeek" in result.blocked_reason
+
+    def test_14_secret_assign_blocked(self, validator):
+        result = validator.validate(
+            'secret = "my-super-secret-value-1234567890"'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "Secret" in result.blocked_reason
+
+    def test_15_bearer_token_blocked(self, validator):
+        result = validator.validate(
+            'Authorization: bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        )
+        assert result.passed is False
+        assert result.blocked is True
+        assert "Bearer" in result.blocked_reason
+
+    def test_16_pwd_assign_blocked(self, validator):
+        result = validator.validate('pwd = "SuperSecret123"')
+        assert result.passed is False
+        assert result.blocked is True
+        assert "pwd" in result.blocked_reason.lower() or "密码" in result.blocked_reason
+
+
+# ==================================================================
+# Warning 级别 — Phase 4.1: 仅保留大段源码/大段 SQL
+# ==================================================================
 
 class TestWarning:
     """warning 级别 — risk_level=high，强制 pending_review。"""
 
-    def test_09_api_key_warning(self, validator):
-        result = validator.validate(
-            'api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'
-        )
-        assert result.passed is True
-        assert result.blocked is False
-        assert result.risk_level == "high"
-        assert any("API Key" in w for w in result.warnings)
-
-    def test_10_token_warning(self, validator):
-        result = validator.validate(
-            'token = "ghp_abcdefghijklmnopqrstuvwxyz"'
-        )
-        assert result.passed is True
-        assert result.risk_level == "high"
-        assert any("Token" in w for w in result.warnings)
-
-    def test_11_large_code_warning(self, validator):
+    def test_17_large_code_warning(self, validator):
         """超过 50 行代码触发 warning。"""
         lines = []
         for i in range(55):
             lines.append(f"    result = process_item(item_{i})")
         content = "def process_all(items):\n" + "\n".join(lines)
         result = validator.validate(content)
+        assert result.blocked is False
         assert result.risk_level == "high"
         assert any("大段源码" in w for w in result.warnings)
 
-    def test_12_code_under_50_lines_passes(self, validator):
+    def test_18_code_under_50_lines_passes(self, validator):
         """不超过 50 行代码不触发 warning。"""
         lines = []
         for i in range(30):
             lines.append(f"    x = {i}")
         content = "def foo():\n" + "\n".join(lines)
         result = validator.validate(content)
+        assert result.blocked is False
         assert result.risk_level == "low"
 
-    def test_13_large_sql_warning(self, validator):
+    def test_19_large_sql_warning(self, validator):
         """超过 500 字符且含 SQL 关键词触发 warning。"""
         sql = (
             "SELECT id, name, value, created_at, updated_at "
@@ -122,46 +179,93 @@ class TestWarning:
         sql += " OR customer_id IN (SELECT id FROM customers WHERE region = 'CN')"
         assert len(sql) > 500
         result = validator.validate(sql)
+        assert result.blocked is False
         assert result.risk_level == "high"
         assert any("SQL" in w for w in result.warnings)
 
-    def test_14_short_sql_passes(self, validator):
+    def test_20_short_sql_passes(self, validator):
         """不超过 500 字符的 SQL 不触发 warning。"""
         sql = "SELECT id, name FROM orders WHERE id = 1"
         result = validator.validate(sql)
+        assert result.blocked is False
         assert result.risk_level == "low"
 
-    def test_15_bearer_token_warning(self, validator):
-        result = validator.validate(
-            'bearer = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."'
-        )
-        assert result.risk_level == "high"
 
-    def test_16_combined_warnings(self, validator):
-        """同时命中多个 warning 规则。"""
-        content = (
-            'api_key = "sk-longerthan20characters!!!" '
-            'and token = "tk-longerthan20chars!!"'
-        )
-        result = validator.validate(content)
-        assert result.risk_level == "high"
-        assert len(result.warnings) >= 2
-
-
-# ------------------------------------------------------------------
+# ==================================================================
 # 批量校验
-# ------------------------------------------------------------------
+# ==================================================================
 
 class TestBatch:
     """批量校验。"""
 
-    def test_17_validate_batch(self, validator):
+    def test_21_validate_batch(self, validator):
         results = validator.validate_batch([
             "normal content here",
             "-----BEGIN RSA PRIVATE KEY----- blocked",
-            "api_key = 'sk-12345678901234567890' warning",
+            # Phase 4.1: api_key 从 warning 升级为 blocked，仍被 blocked
+            "api_key = 'sk-12345678901234567890' is now blocked too",
         ])
         assert len(results) == 3
         assert results[0].passed is True and results[0].blocked is False
         assert results[1].blocked is True
-        assert results[2].risk_level == "high"
+        assert results[2].blocked is True  # Phase 4.1: 升级为 blocked
+
+
+# ==================================================================
+# Phase 4.1: validate_persisted_payload 全字段校验
+# ==================================================================
+
+class TestPersistedPayload:
+    """全字段持久化校验测试。"""
+
+    def test_22_clean_payload_passes(self, validator):
+        result = validator.validate_persisted_payload(
+            title="订单查询接口规范",
+            content="订单查询接口需要添加 @Transactional 注解确保事务一致性",
+            source_evidence={
+                "file": "OrderController.java",
+                "excerpt": "@GetMapping(\"/query\")",
+                "reasoning": "缺少事务注解",
+            },
+            source_file="OrderController.java",
+            tags=["order", "transaction"],
+        )
+        assert result.passed is True
+        assert result.blocked is False
+
+    def test_23_sensitive_in_title_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title='api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
+            content="安全的正文内容",
+        )
+        assert result.blocked is True
+        assert result.blocked_field == "title"
+
+    def test_24_sensitive_in_source_evidence_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文内容",
+            source_evidence={
+                "excerpt": 'token = "ghp_abcdefghijklmnopqrstuvwxyz"',
+            },
+        )
+        assert result.blocked is True
+        assert "source_evidence.excerpt" in result.blocked_field
+
+    def test_25_sensitive_in_tags_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文内容",
+            tags=["order", "AKIA1234567890ABCDEF"],
+        )
+        assert result.blocked is True
+        assert "tags[1]" in result.blocked_field
+
+    def test_26_sensitive_in_source_file_blocked(self, validator):
+        result = validator.validate_persisted_payload(
+            title="安全的标题",
+            content="安全的正文内容",
+            source_file="AKIA1234567890ABCDEF.config",
+        )
+        assert result.blocked is True
+        assert "source_file" in result.blocked_field

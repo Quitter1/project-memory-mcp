@@ -144,7 +144,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 4 — 知识治理（validator/deduplicator/lifecycle/reviewer/governance）。
+当前阶段：阶段 4.1 — 知识治理安全收口（强化 blocked 规则/全字段校验/去重状态过滤/duplicate_rejected 审计/manual_input/rejected 终态）。
 
 ### changed_files 路径规则
 

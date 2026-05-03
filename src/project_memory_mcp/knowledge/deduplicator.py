@@ -27,6 +27,9 @@ class Deduplicator:
 
     SIMILARITY_THRESHOLD = 0.92
 
+    # 仅活跃状态参与去重判定（rejected/deprecated/superseded 不视为重复）
+    ACTIVE_STATUSES = {"candidate", "pending_review", "approved", "conflict"}
+
     def __init__(
         self,
         repo: MemoryRepository,
@@ -54,8 +57,10 @@ class Deduplicator:
         """
         content_hash = compute_content_hash(content)
 
-        # 1. 哈希去重
-        existing = self.repo.find_by_hash(content_hash, project_id, scope=scope)
+        # 1. 哈希去重（仅活跃状态）
+        existing = self.repo.find_by_hash(
+            content_hash, project_id, scope=scope, active_statuses=self.ACTIVE_STATUSES,
+        )
         if existing is not None:
             return DedupResult(
                 is_duplicate=True,
@@ -76,7 +81,9 @@ class Deduplicator:
     ) -> DedupResult:
         """仅执行哈希去重（快速路径）。"""
         content_hash = compute_content_hash(content)
-        existing = self.repo.find_by_hash(content_hash, project_id, scope=scope)
+        existing = self.repo.find_by_hash(
+            content_hash, project_id, scope=scope, active_statuses=self.ACTIVE_STATUSES,
+        )
         if existing is not None:
             return DedupResult(
                 is_duplicate=True,

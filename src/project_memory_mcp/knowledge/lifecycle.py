@@ -17,8 +17,7 @@ class LifecycleManager:
     - pending_review → approved | rejected
     - approved → deprecated | superseded | conflict
     - conflict → approved | rejected（冲突解决）
-    - rejected → candidate（可重新提交）
-    - deprecated / superseded → 终态（不可逆）
+    - rejected / deprecated / superseded → 终态（不可逆）
 
     index_status（索引状态）转换规则：
     - not_indexed → indexed | index_failed
@@ -46,7 +45,7 @@ class LifecycleManager:
             KnowledgeStatus.APPROVED,
             KnowledgeStatus.REJECTED,
         },
-        KnowledgeStatus.REJECTED: {KnowledgeStatus.CANDIDATE},
+        KnowledgeStatus.REJECTED: set(),
         KnowledgeStatus.DEPRECATED: set(),
         KnowledgeStatus.SUPERSEDED: set(),
     }
@@ -61,7 +60,7 @@ class LifecycleManager:
     SEARCHABLE_STATUSES = {KnowledgeStatus.APPROVED}
     DEPRECATABLE_STATUSES = {KnowledgeStatus.APPROVED}
     REVIEWABLE_STATUSES = {KnowledgeStatus.CANDIDATE, KnowledgeStatus.PENDING_REVIEW}
-    TERMINAL_STATUSES = {KnowledgeStatus.DEPRECATED, KnowledgeStatus.SUPERSEDED}
+    TERMINAL_STATUSES = {KnowledgeStatus.REJECTED, KnowledgeStatus.DEPRECATED, KnowledgeStatus.SUPERSEDED}
 
     # ------------------------------------------------------------------
     # status 转换

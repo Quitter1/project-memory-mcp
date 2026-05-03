@@ -1,0 +1,1507 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index dab8956..59c32f0 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -144,7 +144,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 4 — 知识治理（validator/deduplicator/lifecycle/reviewer/governance）。
++当前阶段：阶段 4.1 — 知识治理安全收口（强化 blocked 规则/全字段校验/去重状态过滤/duplicate_rejected 审计/manual_input/rejected 终态）。
+ 
+ ### changed_files 路径规则
+ 
+diff --git a/bash.exe.stackdump b/bash.exe.stackdump
+index ae5c812..0c36574 100644
+--- a/bash.exe.stackdump
++++ b/bash.exe.stackdump
+@@ -1,11 +1,11 @@
+ Stack trace:
+ Frame         Function      Args
+-0007FFFFB3F0  00021005FE8E (000210285F68, 00021026AB6E, 000000000000, 0007FFFFA2F0) msys-2.0.dll+0x1FE8E
+-0007FFFFB3F0  0002100467F9 (000000000000, 000000000000, 000000000000, 0007FFFFB6C8) msys-2.0.dll+0x67F9
+-0007FFFFB3F0  000210046832 (000210286019, 0007FFFFB2A8, 000000000000, 000000000000) msys-2.0.dll+0x6832
+-0007FFFFB3F0  000210068CF6 (000000000000, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x28CF6
+-0007FFFFB3F0  000210068E24 (0007FFFFB400, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x28E24
+-0007FFFFB6D0  00021006A225 (0007FFFFB400, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x2A225
++0007FFFFB010  00021005FE8E (000210285F68, 00021026AB6E, 000000000000, 0007FFFF9F10) msys-2.0.dll+0x1FE8E
++0007FFFFB010  0002100467F9 (000000000000, 000000000000, 000000000000, 0007FFFFB2E8) msys-2.0.dll+0x67F9
++0007FFFFB010  000210046832 (000210286019, 0007FFFFAEC8, 000000000000, 000000000000) msys-2.0.dll+0x6832
++0007FFFFB010  000210068CF6 (000000000000, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x28CF6
++0007FFFFB010  000210068E24 (0007FFFFB020, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x28E24
++0007FFFFB2F0  00021006A225 (0007FFFFB020, 000000000000, 000000000000, 000000000000) msys-2.0.dll+0x2A225
+ End of stack trace
+ Loaded modules:
+ 000100400000 bash.exe
+diff --git a/src/project_memory_mcp/db/memory_repo.py b/src/project_memory_mcp/db/memory_repo.py
+index 6ad9d7e..5e6c974 100644
+--- a/src/project_memory_mcp/db/memory_repo.py
++++ b/src/project_memory_mcp/db/memory_repo.py
+@@ -41,24 +41,32 @@ class MemoryRepository:
+         content_hash: str,
+         project_id: str,
+         scope: Optional[str] = None,
++        active_statuses: Optional[set[str]] = None,
+     ) -> Optional[MemoryItem]:
+         """
+         按内容哈希 + 项目 ID 查找（用于去重）。
+ 
+         可选 scope 过滤，避免不同 scope 的同内容知识被误判重复。
++        可选 active_statuses 过滤，只匹配活跃状态（排除 rejected/deprecated/superseded）。
+         """
++        conditions = ["content_hash = ?", "project_id = ?"]
++        params: list = [content_hash, project_id]
++
+         if scope:
+-            row = self.conn.execute(
+-                "SELECT * FROM memory_items WHERE content_hash = ? AND project_id = ? "
+-                "AND scope = ? ORDER BY created_at DESC LIMIT 1",
+-                (content_hash, project_id, scope),
+-            ).fetchone()
+-        else:
+-            row = self.conn.execute(
+-                "SELECT * FROM memory_items WHERE content_hash = ? AND project_id = ? "
+-                "ORDER BY created_at DESC LIMIT 1",
+-                (content_hash, project_id),
+-            ).fetchone()
++            conditions.append("scope = ?")
++            params.append(scope)
++
++        if active_statuses:
++            placeholders = ",".join("?" for _ in active_statuses)
++            conditions.append(f"status IN ({placeholders})")
++            params.extend(active_statuses)
++
++        where = " AND ".join(conditions)
++        row = self.conn.execute(
++            f"SELECT * FROM memory_items WHERE {where} "
++            "ORDER BY created_at DESC LIMIT 1",
++            params,
++        ).fetchone()
+         if row is None:
+             return None
+         return self._row_to_memory_item(row)
+diff --git a/src/project_memory_mcp/knowledge/deduplicator.py b/src/project_memory_mcp/knowledge/deduplicator.py
+index a79444e..8fee07a 100644
+--- a/src/project_memory_mcp/knowledge/deduplicator.py
++++ b/src/project_memory_mcp/knowledge/deduplicator.py
+@@ -27,6 +27,9 @@ class Deduplicator:
+ 
+     SIMILARITY_THRESHOLD = 0.92
+ 
++    # 仅活跃状态参与去重判定（rejected/deprecated/superseded 不视为重复）
++    ACTIVE_STATUSES = {"candidate", "pending_review", "approved", "conflict"}
++
+     def __init__(
+         self,
+         repo: MemoryRepository,
+@@ -54,8 +57,10 @@ class Deduplicator:
+         """
+         content_hash = compute_content_hash(content)
+ 
+-        # 1. 哈希去重
+-        existing = self.repo.find_by_hash(content_hash, project_id, scope=scope)
++        # 1. 哈希去重（仅活跃状态）
++        existing = self.repo.find_by_hash(
++            content_hash, project_id, scope=scope, active_statuses=self.ACTIVE_STATUSES,
++        )
+         if existing is not None:
+             return DedupResult(
+                 is_duplicate=True,
+@@ -76,7 +81,9 @@ class Deduplicator:
+     ) -> DedupResult:
+         """仅执行哈希去重（快速路径）。"""
+         content_hash = compute_content_hash(content)
+-        existing = self.repo.find_by_hash(content_hash, project_id, scope=scope)
++        existing = self.repo.find_by_hash(
++            content_hash, project_id, scope=scope, active_statuses=self.ACTIVE_STATUSES,
++        )
+         if existing is not None:
+             return DedupResult(
+                 is_duplicate=True,
+diff --git a/src/project_memory_mcp/knowledge/governance.py b/src/project_memory_mcp/knowledge/governance.py
+index cb8af5d..2f09396 100644
+--- a/src/project_memory_mcp/knowledge/governance.py
++++ b/src/project_memory_mcp/knowledge/governance.py
+@@ -1,4 +1,9 @@
+-"""KnowledgeGovernance — 知识治理核心，编排 propose/approve/reject/deprecate 完整流水线。"""
++"""KnowledgeGovernance — 知识治理核心，编排 propose/approve/reject/deprecate 完整流水线。
++
++Phase 4.1 变更：
++- propose_memory 全字段安全校验（validate_persisted_payload）
++- blocked/duplicate_rejected 审计日志仅保存安全摘要（不含原始敏感内容）
++"""
+ 
+ import json
+ from datetime import datetime, timezone
+@@ -26,7 +31,7 @@ class KnowledgeGovernance:
+     知识治理核心。
+ 
+     编排完整流水线：
+-    - propose_memory: 校验 → 去重 → 审批判定 → 写入
++    - propose_memory: 全字段校验 → 去重 → 审批判定 → 写入
+     - approve_memory: 审核通过候选知识
+     - reject_memory: 审核拒绝候选知识
+     - deprecate_memory: 废弃已生效知识
+@@ -72,8 +77,8 @@ class KnowledgeGovernance:
+         提交候选知识，执行完整治理流水线。
+ 
+         流程：
+-        1. 安全校验 → blocked 则只写 audit_log，不保存原文
+-        2. 去重检测 → 哈希冲突则拒绝
++        1. 全字段安全校验 → blocked 则只写 audit_log（安全摘要），不保存原文
++        2. 去重检测 → 哈希冲突则写 audit_log 后拒绝
+         3. 多因素审批判定 → 自动批准或进入 pending_review
+         4. 写入 memory_items + memory_tags + audit_log
+         5. 返回结果
+@@ -87,24 +92,37 @@ class KnowledgeGovernance:
+ 
+         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+ 
+-        # === Step 1: 安全校验 ===
+-        validation = self.validator.validate(content)
++        # === Step 1: 全字段安全校验 ===
++        validation = self.validator.validate_persisted_payload(
++            title=title,
++            content=content,
++            source_evidence=source_evidence,
++            source_file=source_file,
++            tags=tags,
++        )
+ 
+         if validation.blocked:
+-            # 不保存原文，仅写 audit_log
++            # 不保存原文，仅写 audit_log（安全摘要，不含原始敏感内容）
++            safe_summary = json.dumps(
++                {
++                    "title_present": bool(title and title.strip()),
++                    "content_length": len(content) if content else 0,
++                    "blocked_reason": validation.blocked_reason,
++                    "blocked_field": validation.blocked_field,
++                    "type": knowledge_type,
++                    "module": module,
++                    "source_type": source_type,
++                    "source_file": source_file,
++                    "source_line": source_line,
++                    "scope": scope,
++                },
++                ensure_ascii=False,
++            )
+             self.audit.log_action(
+                 action="blocked",
+                 project_id=project.id,
+                 old_value=None,
+-                new_value=json.dumps(
+-                    {
+-                        "title": title,
+-                        "type": knowledge_type,
+-                        "module": module,
+-                        "reason": validation.blocked_reason,
+-                    },
+-                    ensure_ascii=False,
+-                ),
++                new_value=safe_summary,
+                 actor=actor,
+                 reason=validation.blocked_reason,
+                 task_id=task_id,
+@@ -120,6 +138,7 @@ class KnowledgeGovernance:
+                     "passed": False,
+                     "blocked": True,
+                     "blocked_reason": validation.blocked_reason,
++                    "blocked_field": validation.blocked_field,
+                     "warnings": validation.warnings,
+                 },
+                 "review_decision": {
+@@ -134,6 +153,32 @@ class KnowledgeGovernance:
+         )
+ 
+         if dedup_result.is_duplicate:
++            # 写 audit_log（安全摘要，不保留完整原文）
++            safe_summary = json.dumps(
++                {
++                    "title": title,
++                    "title_present": bool(title and title.strip()),
++                    "content_length": len(content) if content else 0,
++                    "type": knowledge_type,
++                    "module": module,
++                    "source_type": source_type,
++                    "scope": scope,
++                    "duplicate_of": dedup_result.duplicate_of,
++                    "duplicate_title": dedup_result.duplicate_title,
++                },
++                ensure_ascii=False,
++            )
++            self.audit.log_action(
++                action="duplicate_rejected",
++                project_id=project.id,
++                old_value=None,
++                new_value=safe_summary,
++                actor=actor,
++                reason=f"内容哈希冲突: 已有知识 {dedup_result.duplicate_of}",
++                task_id=task_id,
++            )
++            self.repo.conn.commit()
++
+             return {
+                 "memory_id": "",
+                 "status": KnowledgeStatus.REJECTED,
+@@ -143,6 +188,7 @@ class KnowledgeGovernance:
+                     "passed": validation.passed,
+                     "blocked": False,
+                     "blocked_reason": "",
++                    "blocked_field": "",
+                     "warnings": validation.warnings,
+                 },
+                 "dedup": {
+@@ -233,6 +279,7 @@ class KnowledgeGovernance:
+                 "passed": validation.passed,
+                 "blocked": False,
+                 "blocked_reason": "",
++                "blocked_field": "",
+                 "warnings": validation.warnings,
+                 "similar_existing": semantic_similar,
+             },
+@@ -284,7 +331,6 @@ class KnowledgeGovernance:
+         )
+ 
+         if updates:
+-            # Apply additional updates if needed
+             for key, value in updates.items():
+                 self.repo.conn.execute(
+                     f"UPDATE memory_items SET {key} = ? WHERE id = ?",
+@@ -327,6 +373,7 @@ class KnowledgeGovernance:
+         审核拒绝候选知识。
+ 
+         仅允许从 candidate/pending_review → rejected。
++        rejected 为终态，不可再次转换。
+         """
+         existing = self.repo.get_by_id(memory_id)
+         if existing is None:
+diff --git a/src/project_memory_mcp/knowledge/lifecycle.py b/src/project_memory_mcp/knowledge/lifecycle.py
+index 78ae363..07a43f5 100644
+--- a/src/project_memory_mcp/knowledge/lifecycle.py
++++ b/src/project_memory_mcp/knowledge/lifecycle.py
+@@ -17,8 +17,7 @@ class LifecycleManager:
+     - pending_review → approved | rejected
+     - approved → deprecated | superseded | conflict
+     - conflict → approved | rejected（冲突解决）
+-    - rejected → candidate（可重新提交）
+-    - deprecated / superseded → 终态（不可逆）
++    - rejected / deprecated / superseded → 终态（不可逆）
+ 
+     index_status（索引状态）转换规则：
+     - not_indexed → indexed | index_failed
+@@ -46,7 +45,7 @@ class LifecycleManager:
+             KnowledgeStatus.APPROVED,
+             KnowledgeStatus.REJECTED,
+         },
+-        KnowledgeStatus.REJECTED: {KnowledgeStatus.CANDIDATE},
++        KnowledgeStatus.REJECTED: set(),
+         KnowledgeStatus.DEPRECATED: set(),
+         KnowledgeStatus.SUPERSEDED: set(),
+     }
+@@ -61,7 +60,7 @@ class LifecycleManager:
+     SEARCHABLE_STATUSES = {KnowledgeStatus.APPROVED}
+     DEPRECATABLE_STATUSES = {KnowledgeStatus.APPROVED}
+     REVIEWABLE_STATUSES = {KnowledgeStatus.CANDIDATE, KnowledgeStatus.PENDING_REVIEW}
+-    TERMINAL_STATUSES = {KnowledgeStatus.DEPRECATED, KnowledgeStatus.SUPERSEDED}
++    TERMINAL_STATUSES = {KnowledgeStatus.REJECTED, KnowledgeStatus.DEPRECATED, KnowledgeStatus.SUPERSEDED}
+ 
+     # ------------------------------------------------------------------
+     # status 转换
+diff --git a/src/project_memory_mcp/knowledge/reviewer.py b/src/project_memory_mcp/knowledge/reviewer.py
+index 9ce4625..ea82e5a 100644
+--- a/src/project_memory_mcp/knowledge/reviewer.py
++++ b/src/project_memory_mcp/knowledge/reviewer.py
+@@ -46,6 +46,7 @@ class RuleBasedReviewer(ReviewerBase):
+         SourceType.USER_CONFIRMED,
+         SourceType.CODE_VERIFIED,
+         SourceType.SQL_VERIFIED,
++        SourceType.MANUAL_INPUT,
+     }
+ 
+     # 安全的风险等级（可自动批准）
+diff --git a/src/project_memory_mcp/knowledge/validator.py b/src/project_memory_mcp/knowledge/validator.py
+index 06a3279..9482e38 100644
+--- a/src/project_memory_mcp/knowledge/validator.py
++++ b/src/project_memory_mcp/knowledge/validator.py
+@@ -1,4 +1,8 @@
+-"""ContentValidator — 敏感信息检测，两级：blocked（不保存原文）+ warning（risk_level=high）。"""
++"""ContentValidator — 敏感信息检测，两级：blocked（不保存原文）+ warning（risk_level=high）。
++
++Phase 4.1 强化：API Key/Token/Secret/Bearer 从 warning 升级为 blocked，
++新增 OpenAI/Anthropic/DeepSeek 专用 Key 检测、pwd 模式。
++"""
+ 
+ import re
+ from dataclasses import dataclass, field
+@@ -11,6 +15,7 @@ class ValidationResult:
+     risk_level: str = "low"       # low|medium|high|critical
+     blocked: bool = False
+     blocked_reason: str = ""
++    blocked_field: str = ""       # 命中的字段名（content/title/source_evidence 等）
+     warnings: list[str] = field(default_factory=list)
+ 
+ 
+@@ -18,11 +23,14 @@ class ContentValidator:
+     """
+     敏感信息检测器。
+ 
+-    两级检测：
+-    1. blocked — 命中直接拒绝，不保存原文（私钥、AWS AKIA、明文密码、JDBC URL）
+-    2. warning — 命中则 risk_level=high，强制 pending_review
++    Phase 4.1 变更：
++    - API Key / Token / Secret / Bearer 从 warning 升级为 blocked
++    - 新增 OpenAI / Anthropic / DeepSeek API Key、pwd 模式
++    - 大段源码 / 大段 SQL 保持 warning 级别
+     """
+ 
++    # ── blocked 正则 ──────────────────────────────────────────────
++
+     PRIVATE_KEY_RE = re.compile(
+         r"-----BEGIN (?:RSA|EC|DSA|OPENSSH|ENCRYPTED) PRIVATE KEY-----",
+     )
+@@ -39,6 +47,7 @@ class ContentValidator:
+         re.IGNORECASE,
+     )
+ 
++    # Phase 4.1: 升级为 blocked
+     API_KEY_ASSIGN_RE = re.compile(
+         r"""(?:api[_-]?key|apikey|secret[_-]?key)\s*[:=]\s*['"]?[\w\-]{20,}['"]?""",
+         re.IGNORECASE,
+@@ -49,24 +58,63 @@ class ContentValidator:
+         re.IGNORECASE,
+     )
+ 
++    # Phase 4.1 新增 — 特定厂商 Key（唯一前缀，必须在泛化 API_KEY_ASSIGN_RE 之前）
++    OPENAI_KEY_RE = re.compile(
++        r"""sk-(?:proj|svcacct)-[A-Za-z0-9]{32,}""",
++    )
++
++    ANTHROPIC_KEY_RE = re.compile(
++        r"""sk-ant-[A-Za-z0-9\-_]{32,}""",
++    )
++
++    DEEPSEEK_KEY_RE = re.compile(
++        r"""sk-[a-z0-9]{32,}""",
++    )
++
++    SECRET_ASSIGN_RE = re.compile(
++        r"""(?:secret|secret_key|private_key)\s*[:=]\s*['"]?[\w\-/+=]{20,}['"]?""",
++        re.IGNORECASE,
++    )
++
++    BEARER_ASSIGN_RE = re.compile(
++        r"""bearer\s+['"]?[\w\-.]{20,}['"]?""",
++        re.IGNORECASE,
++    )
++
++    PWD_ASSIGN_RE = re.compile(
++        r"""\bpwd\s*[:=]\s*['"][^'"]{4,}['"]""",
++        re.IGNORECASE,
++    )
++
++    # ── warning 检测阈值 ───────────────────────────────────────────
++
+     MAX_CODE_LINES = 50
+     MAX_SQL_LENGTH = 500
+ 
++    # ── 规则列表 ───────────────────────────────────────────────────
++
+     BLOCKED_RULES: list[tuple[re.Pattern, str]] = [
+         (PRIVATE_KEY_RE, "私钥 (BEGIN PRIVATE KEY)"),
+         (AWS_AKIA_RE, "AWS IAM Access Key (AKIA...)"),
++        # 特定厂商 Key 必须在通用 API_KEY_ASSIGN_RE 之前，避免被泛化匹配吞掉
++        (OPENAI_KEY_RE, "OpenAI API Key (sk-...)"),
++        (ANTHROPIC_KEY_RE, "Anthropic API Key (sk-ant-...)"),
++        (DEEPSEEK_KEY_RE, "DeepSeek API Key (sk-...)"),
+         (PLAINTEXT_PASSWORD_RE, "明文数据库密码 (password=...)"),
+         (JDBC_PASSWORD_RE, "JDBC URL 含明文密码"),
++        # Phase 4.1: 从 warning 升级
++        (API_KEY_ASSIGN_RE, "API Key 赋值"),
++        (TOKEN_ASSIGN_RE, "Token 赋值"),
++        (SECRET_ASSIGN_RE, "Secret/Private Key 赋值"),
++        (BEARER_ASSIGN_RE, "Bearer Token"),
++        (PWD_ASSIGN_RE, "明文密码 (pwd=...)"),
+     ]
+ 
+     WARNING_RULES: list[tuple[re.Pattern, str]] = [
+-        (API_KEY_ASSIGN_RE, "API Key 赋值"),
+-        (TOKEN_ASSIGN_RE, "Token 赋值"),
++        # 仅保留大段源码/大段 SQL 作为 warning（在 validate() 中手工检测）
+     ]
+ 
+-    # ------------------------------------------------------------------
+-    # 公开 API
+-    # ------------------------------------------------------------------
++    # ── 公开 API ───────────────────────────────────────────────────
+ 
+     def validate(self, content: str) -> ValidationResult:
+         """
+@@ -78,27 +126,27 @@ class ContentValidator:
+         """
+         # Step 1: blocked
+         for pattern, label in self.BLOCKED_RULES:
+-            if pattern.search(content):
++            m = pattern.search(content)
++            if m:
+                 return ValidationResult(
+                     passed=False,
+                     risk_level="critical",
+                     blocked=True,
+                     blocked_reason=f"blocked_sensitive: {label}",
++                    blocked_field="content",
+                     warnings=[f"命中 blocked 规则: {label}"],
+                 )
+ 
+-        # Step 2: warning
++        # Step 2: warning（大段源码 + 大段 SQL）
+         warnings: list[str] = []
+         risk_level = "low"
+ 
+-        # 大段源码检测
+         lines = content.splitlines()
+         code_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+         if len(code_lines) > self.MAX_CODE_LINES:
+             warnings.append(f"疑似大段源码 ({len(code_lines)} 行，超过 {self.MAX_CODE_LINES} 行限制)")
+             risk_level = "high"
+ 
+-        # 大段 SQL 检测
+         sql_indicators = (
+             "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE",
+             "ALTER TABLE", "DROP ", "JOIN ", "FROM ", "WHERE ",
+@@ -108,12 +156,6 @@ class ContentValidator:
+             warnings.append(f"疑似大段 SQL dump ({len(content)} 字符，超过 {self.MAX_SQL_LENGTH} 限制)")
+             risk_level = "high"
+ 
+-        # 正则 warning 规则
+-        for pattern, label in self.WARNING_RULES:
+-            if pattern.search(content):
+-                warnings.append(f"命中 warning 规则: {label}")
+-                risk_level = "high"
+-
+         return ValidationResult(
+             passed=True,
+             risk_level=risk_level,
+@@ -124,3 +166,53 @@ class ContentValidator:
+     def validate_batch(self, contents: list[str]) -> list[ValidationResult]:
+         """批量校验多个内容。"""
+         return [self.validate(c) for c in contents]
++
++    # ── 全字段持久化校验 ──────────────────────────────────────────
++
++    def validate_persisted_payload(
++        self,
++        title: str,
++        content: str,
++        source_evidence: dict | None = None,
++        source_file: str | None = None,
++        tags: list[str] | None = None,
++    ) -> ValidationResult:
++        """
++        对拟持久化的全部字段执行敏感信息检测。
++
++        检查字段：title, content, source_evidence 各字段、source_file、tags。
++        命中任一字段 → blocked，返回 blocked_field 指明命中字段。
++        """
++        # 按优先级检查各字段
++        checks = [
++            ("content", content),
++            ("title", title),
++        ]
++
++        if source_file:
++            checks.append(("source_file", source_file))
++
++        if source_evidence:
++            for key in ("excerpt", "reasoning", "file"):
++                val = source_evidence.get(key)
++                if val and isinstance(val, str):
++                    checks.append((f"source_evidence.{key}", val))
++
++        if tags:
++            for i, tag in enumerate(tags):
++                if tag and isinstance(tag, str):
++                    checks.append((f"tags[{i}]", tag))
++
++        final_result = ValidationResult(passed=True, risk_level="low")
++
++        for field_name, text in checks:
++            result = self.validate(text)
++            if result.blocked:
++                result.blocked_field = field_name
++                return result
++            # 传播 warning 和 risk_level（取最高）
++            if result.risk_level == "high":
++                final_result.risk_level = "high"
++            final_result.warnings.extend(result.warnings)
++
++        return final_result
+diff --git a/tests/test_governance.py b/tests/test_governance.py
+index 6d7fc2b..e2c6219 100644
+--- a/tests/test_governance.py
++++ b/tests/test_governance.py
+@@ -1,4 +1,12 @@
+-"""治理逻辑测试 — lifecycle, reviewer, deduplicator, governance 集成。"""
++"""治理逻辑测试 — lifecycle, reviewer, deduplicator, governance 集成。
++
++Phase 4.1 新增：
++- rejected 终态测试
++- manual_input 可信来源测试
++- dedup 活跃状态过滤测试
++- duplicate_rejected audit_log 测试
++- 全字段安全校验测试
++"""
+ 
+ import os
+ import sqlite3
+@@ -22,6 +30,7 @@ from project_memory_mcp.knowledge.validator import ContentValidator
+ from project_memory_mcp.knowledge.deduplicator import Deduplicator
+ from project_memory_mcp.knowledge.governance import KnowledgeGovernance, GovernanceError
+ from project_memory_mcp.models.enums import KnowledgeStatus, IndexStatus, Scope, RiskLevel
++from project_memory_mcp.utils.hashing import compute_content_hash
+ 
+ 
+ # ------------------------------------------------------------------
+@@ -62,7 +71,6 @@ def audit_repo(conn) -> AuditRepository:
+ 
+ @pytest.fixture
+ def project_config() -> ProjectConfig:
+-    """创建测试用项目配置。"""
+     return ProjectConfig(
+         id="test-project",
+         name="测试项目",
+@@ -89,7 +97,6 @@ def project_config() -> ProjectConfig:
+ 
+ @pytest.fixture
+ def auto_approve_project_config() -> ProjectConfig:
+-    """允许 AI 自动批准 + 更低阈值的项目配置。"""
+     return ProjectConfig(
+         id="auto-project",
+         name="自动批准项目",
+@@ -133,7 +140,6 @@ def governance(memory_repo, audit_repo, validator, deduplicator, reviewer):
+ 
+ 
+ def _seed_project(project_repo, project_config):
+-    """同步 ProjectConfig 到 SQLite。"""
+     return project_repo.upsert_project(
+         Project(
+             id=project_config.id,
+@@ -182,8 +188,11 @@ class TestLifecycle:
+         allowed = LifecycleManager.get_allowed_transitions("superseded")
+         assert allowed == set()
+ 
+-    def test_07_rejected_can_resubmit(self):
+-        assert LifecycleManager.can_transition("rejected", "candidate") is True
++    def test_07_rejected_is_terminal(self):
++        """Phase 4.1: rejected 是终态，不可再转换。"""
++        allowed = LifecycleManager.get_allowed_transitions("rejected")
++        assert allowed == set()
++        assert LifecycleManager.is_terminal("rejected") is True
+ 
+     def test_08_reviewable_statuses(self):
+         assert LifecycleManager.is_reviewable("candidate") is True
+@@ -206,6 +215,19 @@ class TestLifecycle:
+         assert LifecycleManager.initial_status() == "candidate"
+         assert LifecycleManager.initial_index_status() == "not_indexed"
+ 
++    # ── Phase 4.1 新增: rejected 终态验证 ──
++
++    def test_13_rejected_cannot_transition_to_candidate(self):
++        """Phase 4.1: rejected → candidate 非法。"""
++        assert LifecycleManager.can_transition("rejected", "candidate") is False
++        with pytest.raises(InvalidTransitionError, match="非法的状态转换"):
++            LifecycleManager.validate_transition("rejected", "candidate")
++
++    def test_14_rejected_to_approved_raises(self):
++        """Phase 4.1: rejected → approved 非法。"""
++        with pytest.raises(InvalidTransitionError, match="非法的状态转换"):
++            LifecycleManager.validate_transition("rejected", "approved")
++
+ 
+ # ==================================================================
+ # RuleBasedReviewer 测试
+@@ -214,7 +236,7 @@ class TestLifecycle:
+ class TestReviewer:
+     """多因素审批判定测试。"""
+ 
+-    def test_13_all_conditions_met_auto_approved(self, reviewer, auto_approve_project_config):
++    def test_15_all_conditions_met_auto_approved(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -226,7 +248,7 @@ class TestReviewer:
+         assert decision.auto_approved is True
+         assert "满足全部" in decision.reason
+ 
+-    def test_14_scope_shared_no_auto_approve(self, reviewer, auto_approve_project_config):
++    def test_16_scope_shared_no_auto_approve(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "shared",
+@@ -238,7 +260,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "shared" in decision.reason
+ 
+-    def test_15_scope_global_no_auto_approve(self, reviewer, auto_approve_project_config):
++    def test_17_scope_global_no_auto_approve(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "global",
+@@ -249,7 +271,7 @@ class TestReviewer:
+         decision = reviewer.review(item, auto_approve_project_config)
+         assert decision.auto_approved is False
+ 
+-    def test_16_risk_high_no_auto_approve(self, reviewer, auto_approve_project_config):
++    def test_18_risk_high_no_auto_approve(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -261,7 +283,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "high" in decision.reason
+ 
+-    def test_17_confidence_below_threshold(self, reviewer, auto_approve_project_config):
++    def test_19_confidence_below_threshold(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.5,
+             "scope": "project",
+@@ -273,8 +295,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "confidence" in decision.reason
+ 
+-    def test_18_ai_source_disabled_no_auto_approve(self, reviewer, project_config):
+-        """默认 project_config 不允许 AI 自动批准。"""
++    def test_20_ai_source_disabled_no_auto_approve(self, reviewer, project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -286,8 +307,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "AI 来源" in decision.reason
+ 
+-    def test_19_user_confirmed_source_auto_approved(self, reviewer, project_config):
+-        """user_confirmed 来源在默认配置下也可自动批准。"""
++    def test_21_user_confirmed_source_auto_approved(self, reviewer, project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -298,7 +318,7 @@ class TestReviewer:
+         decision = reviewer.review(item, project_config)
+         assert decision.auto_approved is True
+ 
+-    def test_20_code_verified_source_auto_approved(self, reviewer, project_config):
++    def test_22_code_verified_source_auto_approved(self, reviewer, project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -309,8 +329,7 @@ class TestReviewer:
+         decision = reviewer.review(item, project_config)
+         assert decision.auto_approved is True
+ 
+-    def test_21_forbidden_type_no_auto_approve(self, reviewer):
+-        """即使其它条件满足，forbidden_auto_types 中的类型也不自动批准。"""
++    def test_23_forbidden_type_no_auto_approve(self, reviewer):
+         config = ProjectConfig(
+             id="test",
+             name="test",
+@@ -331,7 +350,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "forbidden_auto_types" in decision.reason
+ 
+-    def test_22_validation_failed_no_auto_approve(self, reviewer, auto_approve_project_config):
++    def test_24_validation_failed_no_auto_approve(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -343,7 +362,7 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "安全校验" in decision.reason
+ 
+-    def test_23_has_duplicate_no_auto_approve(self, reviewer, auto_approve_project_config):
++    def test_25_has_duplicate_no_auto_approve(self, reviewer, auto_approve_project_config):
+         item = {
+             "confidence": 0.9,
+             "scope": "project",
+@@ -355,6 +374,45 @@ class TestReviewer:
+         assert decision.auto_approved is False
+         assert "哈希冲突" in decision.reason
+ 
++    # ── Phase 4.1 新增: manual_input 可信来源 ──
++
++    def test_26_manual_input_source_auto_approved(self, reviewer, project_config):
++        """manual_input 来源在默认配置下也可自动批准。"""
++        item = {
++            "confidence": 0.9,
++            "scope": "project",
++            "risk_level": "low",
++            "source_type": "manual_input",
++            "type": "architecture",
++        }
++        decision = reviewer.review(item, project_config)
++        assert decision.auto_approved is True
++
++    def test_27_manual_input_low_confidence_no_auto(self, reviewer, project_config):
++        """manual_input 但 confidence 不足不自动批准。"""
++        item = {
++            "confidence": 0.5,
++            "scope": "project",
++            "risk_level": "low",
++            "source_type": "manual_input",
++            "type": "architecture",
++        }
++        decision = reviewer.review(item, project_config)
++        assert decision.auto_approved is False
++
++    def test_28_imported_doc_not_trusted(self, reviewer, auto_approve_project_config):
++        """imported_doc 不在可信来源列表中。"""
++        item = {
++            "confidence": 0.9,
++            "scope": "project",
++            "risk_level": "low",
++            "source_type": "imported_doc",
++            "type": "architecture",
++        }
++        decision = reviewer.review(item, auto_approve_project_config)
++        assert decision.auto_approved is False
++        assert "可信来源" in decision.reason
++
+ 
+ # ==================================================================
+ # KnowledgeGovernance 集成测试
+@@ -363,7 +421,7 @@ class TestReviewer:
+ class TestGovernancePropose:
+     """propose_memory 完整流水线测试。"""
+ 
+-    def test_24_propose_normal_pending_review(
++    def test_29_propose_normal_pending_review(
+         self, governance, project_repo, project_config,
+     ):
+         """AI 来源 + 项目禁止 AI 自动批准 → pending_review。"""
+@@ -385,7 +443,7 @@ class TestGovernancePropose:
+         assert result["validation"]["passed"] is True
+         assert result["validation"]["blocked"] is False
+ 
+-    def test_25_propose_auto_approved(
++    def test_30_propose_auto_approved(
+         self, governance, project_repo, auto_approve_project_config,
+     ):
+         """高置信度 + 允许 AI 自动批准 → approved。"""
+@@ -402,7 +460,7 @@ class TestGovernancePropose:
+         assert result["status"] == "approved"
+         assert result["review_decision"]["auto_approved"] is True
+ 
+-    def test_26_propose_blocked_sensitive(
++    def test_31_propose_blocked_sensitive(
+         self, governance, project_repo, project_config, audit_repo,
+     ):
+         """blocked 敏感信息 → rejected, 不保存原文, 但有 audit_log。"""
+@@ -422,10 +480,10 @@ class TestGovernancePropose:
+         logs = audit_repo.list_by_project_id(project_config.id)
+         assert any("blocked" in (log["action"] or "") for log in logs)
+ 
+-    def test_27_propose_duplicate_rejected(
+-        self, governance, project_repo, project_config,
++    def test_32_propose_duplicate_rejected(
++        self, governance, project_repo, project_config, audit_repo,
+     ):
+-        """哈希重复 → 拒绝。"""
++        """哈希重复 → 拒绝 + duplicate_rejected audit_log。"""
+         _seed_project(project_repo, project_config)
+ 
+         content = "完全相同的知识内容，用于测试哈希去重功能"
+@@ -453,7 +511,13 @@ class TestGovernancePropose:
+         assert result2["status"] == "rejected"
+         assert result2.get("dedup", {}).get("is_duplicate") is True
+ 
+-    def test_28_propose_shared_always_pending_review(
++        # Phase 4.1: 验证 duplicate_rejected audit_log
++        logs = audit_repo.list_by_project_id(project_config.id)
++        dup_logs = [l for l in logs if l.get("action") == "duplicate_rejected"]
++        assert len(dup_logs) >= 1
++        assert "duplicate_of" in (dup_logs[0].get("new_value") or "")
++
++    def test_33_propose_shared_always_pending_review(
+         self, governance, project_repo, auto_approve_project_config,
+     ):
+         """shared scope 即使在允许自动批准的项目中也强制 pending_review。"""
+@@ -472,14 +536,21 @@ class TestGovernancePropose:
+         assert result["review_decision"]["auto_approved"] is False
+         assert "shared" in result["review_decision"]["reason"]
+ 
+-    def test_29_propose_with_warnings_risk_high(
++    def test_34_propose_large_sql_warning_risk_high(
+         self, governance, project_repo, project_config,
+     ):
+-        """warning 检测命中 → risk_level=high → pending_review。"""
++        """Phase 4.1: 大段 SQL 触发 warning → risk_level=high → pending_review。"""
+         _seed_project(project_repo, project_config)
++        sql = (
++            "SELECT id, name, value, created_at, updated_at "
++            "FROM orders WHERE status = 'active' "
++            "AND type IN ('a', 'b', 'c') "
++        ) * 8
++        sql += " OR customer_id IN (SELECT id FROM customers WHERE region = 'CN')"
++        assert len(sql) > 500
+         result = governance.propose_memory(
+-            title="包含 API Key 的知识",
+-            content='配置: api_key = "sk-thisisaverylongapikeyfortesting12345"',
++            title="大段 SQL 查询",
++            content=sql,
+             project=project_config,
+             confidence=0.9,
+             source_type="user_confirmed",
+@@ -489,12 +560,242 @@ class TestGovernancePropose:
+         assert result["status"] == "pending_review"
+         assert len(result["validation"]["warnings"]) >= 1
+ 
++    # ── Phase 4.1 新增: 全字段安全校验 ──
++
++    def test_35_sensitive_in_title_blocked(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """title 中包含敏感信息 → blocked。"""
++        _seed_project(project_repo, project_config)
++        result = governance.propose_memory(
++            title='api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
++            content="安全的正文内容",
++            project=project_config,
++            actor="test",
++        )
++        assert result["status"] == "rejected"
++        assert result["validation"]["blocked"] is True
++        assert "title" in result["validation"].get("blocked_field", "")
++
++    def test_36_sensitive_in_source_evidence_blocked(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """source_evidence 中包含敏感信息 → blocked。"""
++        _seed_project(project_repo, project_config)
++        result = governance.propose_memory(
++            title="安全的标题",
++            content="安全的正文内容",
++            project=project_config,
++            source_evidence={
++                "file": "config.py",
++                "excerpt": 'secret_key = "super-secret-1234567890"',
++            },
++            actor="test",
++        )
++        assert result["status"] == "rejected"
++        assert result["validation"]["blocked"] is True
++        blocked_field = result["validation"].get("blocked_field", "")
++        assert "source_evidence" in blocked_field
++
++    def test_37_sensitive_in_tags_blocked(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """tags 中包含敏感信息 → blocked。"""
++        _seed_project(project_repo, project_config)
++        result = governance.propose_memory(
++            title="安全的标题",
++            content="安全的正文内容",
++            project=project_config,
++            tags=["order", "AKIA1234567890ABCDEF"],
++            actor="test",
++        )
++        assert result["status"] == "rejected"
++        assert result["validation"]["blocked"] is True
++        assert "tags" in result["validation"].get("blocked_field", "")
++
++    def test_38_blocked_audit_safe_summary(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """blocked audit_log 仅含安全摘要，不含原始敏感内容。"""
++        _seed_project(project_repo, project_config)
++        sensitive_content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA..."
++        governance.propose_memory(
++            title="私钥知识",
++            content=sensitive_content,
++            project=project_config,
++            actor="test-agent",
++        )
++
++        logs = audit_repo.list_by_project_id(project_config.id)
++        blocked_logs = [l for l in logs if l.get("action") == "blocked"]
++        assert len(blocked_logs) >= 1
++
++        new_value = blocked_logs[0].get("new_value") or ""
++        # 安全摘要应包含元信息但不含原始私钥正文
++        assert "content_length" in new_value
++        assert "blocked_reason" in new_value
++        assert "blocked_field" in new_value
++        assert "MIIEpA" not in new_value  # 私钥正文不应出现在 audit_log 中
++
++    def test_39_duplicate_audit_safe_summary(
++        self, governance, project_repo, project_config, audit_repo,
++    ):
++        """duplicate_rejected audit_log 仅含安全摘要。"""
++        _seed_project(project_repo, project_config)
++        content = "用于测试重复审计日志安全摘要的知识内容"
++
++        # 第一次提交
++        governance.propose_memory(
++            title="原始知识",
++            content=content,
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++
++        # 第二次提交（重复）
++        governance.propose_memory(
++            title="重复知识",
++            content=content,
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++
++        logs = audit_repo.list_by_project_id(project_config.id)
++        dup_logs = [l for l in logs if l.get("action") == "duplicate_rejected"]
++        assert len(dup_logs) >= 1
++
++        new_value = dup_logs[0].get("new_value") or ""
++        assert "duplicate_of" in new_value
++        assert "content_length" in new_value
++
++    # ── Phase 4.1 新增: dedup 活跃状态过滤 ──
++
++    def test_40_dedup_ignores_rejected(
++        self, governance, memory_repo, project_repo, project_config,
++    ):
++        """rejected 状态的知识不阻止相同内容再次提交。"""
++        _seed_project(project_repo, project_config)
++
++        # 先创建一条被拒绝的知识（通过提交包含私钥的内容）
++        governance.propose_memory(
++            title="被拒绝的知识",
++            content="-----BEGIN RSA PRIVATE KEY-----\nblocked",
++            project=project_config,
++            actor="test",
++        )
++
++        # 手动创建一条被拒绝的知识（非敏感内容但被拒绝）
++        item = MemoryItem(
++            project_id=project_config.id,
++            type="architecture",
++            title="之前被拒绝的知识",
++            content="安全的重复内容用于测试",
++            content_hash=compute_content_hash("安全的重复内容用于测试"),
++            status="rejected",
++            scope="project",
++            source_type="ai_inferred",
++        )
++        memory_repo.create_memory(item, actor="test")
++
++        # 再次提交相同内容
++        result = governance.propose_memory(
++            title="重新提交的知识",
++            content="安全的重复内容用于测试",
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++        # 不应被去重拦截（rejected 不参与去重）
++        assert result.get("dedup", {}).get("is_duplicate", False) is False
++        assert result["status"] != "rejected" or "blocked" in str(result)
++
++    def test_41_dedup_ignores_deprecated(
++        self, governance, memory_repo, project_repo, project_config,
++    ):
++        """deprecated 状态的知识不阻止相同内容再次提交。"""
++        _seed_project(project_repo, project_config)
++
++        content = "被废弃的旧知识内容"
++        item = MemoryItem(
++            project_id=project_config.id,
++            type="architecture",
++            title="已废弃的知识",
++            content=content,
++            content_hash=compute_content_hash(content),
++            status="deprecated",
++            scope="project",
++            source_type="user_confirmed",
++        )
++        memory_repo.create_memory(item, actor="test")
++
++        result = governance.propose_memory(
++            title="新知识（内容同废弃知识）",
++            content=content,
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++        assert result.get("dedup", {}).get("is_duplicate", False) is False
++
++    def test_42_dedup_blocks_approved_duplicate(
++        self, governance, project_repo, project_config,
++    ):
++        """approved 状态的知识仍然阻止相同内容提交。"""
++        _seed_project(project_repo, project_config)
++
++        content = "已批准的活跃知识内容"
++        # 第一次提交（自动批准）
++        result1 = governance.propose_memory(
++            title="已批准的知识",
++            content=content,
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++        assert result1["status"] == "approved"
++
++        # 第二次提交相同内容
++        result2 = governance.propose_memory(
++            title="重复的知识",
++            content=content,
++            project=project_config,
++            confidence=0.9,
++            source_type="user_confirmed",
++            actor="test",
++        )
++        assert result2["status"] == "rejected"
++        assert result2.get("dedup", {}).get("is_duplicate") is True
++
++    # ── Phase 4.1 新增: manual_input 集成 ──
++
++    def test_43_manual_input_auto_approve_integration(
++        self, governance, project_repo, project_config,
++    ):
++        """manual_input + 高置信度 + 低风险 → 自动批准。"""
++        _seed_project(project_repo, project_config)
++        result = governance.propose_memory(
++            title="人工录入的知识",
++            content="这是用户手动录入的确认知识",
++            project=project_config,
++            confidence=0.9,
++            source_type="manual_input",
++            actor="user",
++        )
++        assert result["status"] == "approved"
++        assert result["review_decision"]["auto_approved"] is True
++
+ 
+ class TestGovernanceApproveReject:
+     """approve/reject/deprecate 操作测试。"""
+ 
+     def _create_memory(self, memory_repo, project_repo, project_config, **kwargs):
+-        """辅助：直接创建一条知识。"""
+         from project_memory_mcp.utils.hashing import compute_content_hash
+ 
+         _seed_project(project_repo, project_config)
+@@ -513,7 +814,7 @@ class TestGovernanceApproveReject:
+         )
+         return memory_repo.create_memory(item, actor="test")
+ 
+-    def test_30_approve_candidate(
++    def test_44_approve_candidate(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """批准候选知识 → approved。"""
+@@ -524,12 +825,11 @@ class TestGovernanceApproveReject:
+         assert result["status"] == "approved"
+         assert result["reviewed_by"] == "admin"
+ 
+-        # 验证数据库状态
+         updated = memory_repo.get_by_id(item.id)
+         assert updated.status == "approved"
+         assert updated.reviewed_by == "admin"
+ 
+-    def test_31_reject_candidate(
++    def test_45_reject_candidate(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """拒绝候选知识 → rejected。"""
+@@ -542,7 +842,7 @@ class TestGovernanceApproveReject:
+         updated = memory_repo.get_by_id(item.id)
+         assert updated.status == "rejected"
+ 
+-    def test_32_deprecate_approved(
++    def test_46_deprecate_approved(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """废弃已批准知识 → deprecated。"""
+@@ -557,7 +857,7 @@ class TestGovernanceApproveReject:
+         updated = memory_repo.get_by_id(item.id)
+         assert updated.status == "deprecated"
+ 
+-    def test_33_approve_non_reviewable_raises(
++    def test_47_approve_non_reviewable_raises(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """批准已 approved 的知识应抛出错误。"""
+@@ -567,7 +867,17 @@ class TestGovernanceApproveReject:
+         with pytest.raises(GovernanceError, match="不可审核"):
+             governance.approve_memory(memory_id=item.id, reviewer="admin")
+ 
+-    def test_34_deprecate_non_approved_raises(
++    def test_48_approve_rejected_raises(
++        self, governance, memory_repo, project_repo, project_config,
++    ):
++        """Phase 4.1: rejected 为终态，不可再 approve。"""
++        item = self._create_memory(
++            memory_repo, project_repo, project_config, status="rejected"
++        )
++        with pytest.raises(GovernanceError, match="不可审核"):
++            governance.approve_memory(memory_id=item.id, reviewer="admin")
++
++    def test_49_deprecate_non_approved_raises(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """废弃 candidate 状态的知识应抛出错误。"""
+@@ -575,14 +885,14 @@ class TestGovernanceApproveReject:
+         with pytest.raises(GovernanceError, match="不可废弃"):
+             governance.deprecate_memory(memory_id=item.id)
+ 
+-    def test_35_nonexistent_memory_raises(
++    def test_50_nonexistent_memory_raises(
+         self, governance,
+     ):
+         """操作不存在的知识应抛出错误。"""
+         with pytest.raises(GovernanceError, match="不存在"):
+             governance.approve_memory(memory_id="nonexistent-id", reviewer="admin")
+ 
+-    def test_36_approve_with_confidence_override(
++    def test_51_approve_with_confidence_override(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """审核通过时可覆盖置信度。"""
+@@ -595,7 +905,7 @@ class TestGovernanceApproveReject:
+         updated = memory_repo.get_by_id(item.id)
+         assert updated.confidence == 0.99
+ 
+-    def test_37_audit_log_for_approve(
++    def test_52_audit_log_for_approve(
+         self, governance, memory_repo, project_repo, project_config, audit_repo,
+     ):
+         """审批操作写入 audit_log。"""
+@@ -608,7 +918,7 @@ class TestGovernanceApproveReject:
+         assert len(status_changes) >= 1
+         assert "approved" in status_changes[0]["reason"]
+ 
+-    def test_38_audit_log_for_deprecate(
++    def test_53_audit_log_for_deprecate(
+         self, governance, memory_repo, project_repo, project_config, audit_repo,
+     ):
+         """废弃操作写入 audit_log。"""
+@@ -621,7 +931,7 @@ class TestGovernanceApproveReject:
+         status_changes = [l for l in logs if l["action"] == "status_changed"]
+         assert any("deprecated" in l["reason"] for l in status_changes)
+ 
+-    def test_39_empty_title_raises(
++    def test_54_empty_title_raises(
+         self, governance, project_config,
+     ):
+         """空标题应拒绝。"""
+@@ -630,7 +940,7 @@ class TestGovernanceApproveReject:
+                 title="", content="some content", project=project_config,
+             )
+ 
+-    def test_40_empty_content_raises(
++    def test_55_empty_content_raises(
+         self, governance, project_config,
+     ):
+         """空内容应拒绝。"""
+@@ -639,7 +949,7 @@ class TestGovernanceApproveReject:
+                 title="test", content="", project=project_config,
+             )
+ 
+-    def test_41_confidence_override_keeps_approved_status(
++    def test_56_confidence_override_keeps_approved_status(
+         self, governance, memory_repo, project_repo, project_config,
+     ):
+         """审核通过后 confidence 更新不影响 approved 状态。"""
+@@ -652,3 +962,13 @@ class TestGovernanceApproveReject:
+         updated = memory_repo.get_by_id(item.id)
+         assert updated.status == "approved"
+         assert updated.confidence == 0.85
++
++    def test_57_reject_rejected_raises(
++        self, governance, memory_repo, project_repo, project_config,
++    ):
++        """Phase 4.1: 再次拒绝已 rejected 的知识应抛出错误（终态）。"""
++        item = self._create_memory(
++            memory_repo, project_repo, project_config, status="rejected"
++        )
++        with pytest.raises(GovernanceError, match="不可审核"):
++            governance.reject_memory(memory_id=item.id, reason="再次拒绝")
+diff --git a/tests/test_validator.py b/tests/test_validator.py
+index bff4bec..e573c28 100644
+--- a/tests/test_validator.py
++++ b/tests/test_validator.py
+@@ -1,4 +1,8 @@
+-"""ContentValidator 测试 — blocked/warning 两级检测。"""
++"""ContentValidator 测试 — blocked/warning 两级检测 + 全字段校验。
++
++Phase 4.1 更新：API Key/Token/Secret/Bearer 从 warning 升级为 blocked，
++新增 OpenAI/Anthropic/DeepSeek Key、pwd 检测、validate_persisted_payload。
++"""
+ 
+ import pytest
+ 
+@@ -10,9 +14,9 @@ def validator():
+     return ContentValidator()
+ 
+ 
+-# ------------------------------------------------------------------
+-# Blocked 级别
+-# ------------------------------------------------------------------
++# ==================================================================
++# Blocked 级别 — Phase 4.1 强化
++# ==================================================================
+ 
+ class TestBlocked:
+     """blocked 级别 — 不保存原文。"""
+@@ -32,6 +36,7 @@ MIICXAIBAAKBgQC...
+         assert result.passed is False
+         assert result.blocked is True
+         assert "私钥" in result.blocked_reason
++        assert result.blocked_field == "content"
+ 
+     def test_03_aws_akia_blocked(self, validator):
+         result = validator.validate("AWS key: AKIA1234567890ABCDEF with secret")
+@@ -68,51 +73,103 @@ MIICXAIBAAKBgQC...
+         result = validator.validate(content)
+         assert result.blocked is True
+ 
++    # ── Phase 4.1: 从 warning 升级为 blocked ──
+ 
+-# ------------------------------------------------------------------
+-# Warning 级别
+-# ------------------------------------------------------------------
+-
+-class TestWarning:
+-    """warning 级别 — risk_level=high，强制 pending_review。"""
+-
+-    def test_09_api_key_warning(self, validator):
++    def test_09_api_key_blocked(self, validator):
+         result = validator.validate(
+             'api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'
+         )
+-        assert result.passed is True
+-        assert result.blocked is False
+-        assert result.risk_level == "high"
+-        assert any("API Key" in w for w in result.warnings)
++        assert result.passed is False
++        assert result.blocked is True
++        assert result.blocked_field == "content"
++        assert "API Key" in result.blocked_reason
+ 
+-    def test_10_token_warning(self, validator):
++    def test_10_token_blocked(self, validator):
+         result = validator.validate(
+             'token = "ghp_abcdefghijklmnopqrstuvwxyz"'
+         )
+-        assert result.passed is True
+-        assert result.risk_level == "high"
+-        assert any("Token" in w for w in result.warnings)
++        assert result.passed is False
++        assert result.blocked is True
++        assert "Token" in result.blocked_reason
++
++    # ── Phase 4.1 新增 blocked 规则 ──
++
++    def test_11_openai_key_blocked(self, validator):
++        result = validator.validate(
++            'OPENAI_API_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"'
++        )
++        assert result.passed is False
++        assert result.blocked is True
++        assert "OpenAI" in result.blocked_reason
++
++    def test_12_anthropic_key_blocked(self, validator):
++        result = validator.validate(
++            'ANTHROPIC_API_KEY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456"'
++        )
++        assert result.passed is False
++        assert result.blocked is True
++        assert "Anthropic" in result.blocked_reason
++
++    def test_13_deepseek_key_blocked(self, validator):
++        result = validator.validate(
++            'DEEPSEEK_API_KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"'
++        )
++        assert result.passed is False
++        assert result.blocked is True
++        assert "DeepSeek" in result.blocked_reason
++
++    def test_14_secret_assign_blocked(self, validator):
++        result = validator.validate(
++            'secret = "my-super-secret-value-1234567890"'
++        )
++        assert result.passed is False
++        assert result.blocked is True
++        assert "Secret" in result.blocked_reason
++
++    def test_15_bearer_token_blocked(self, validator):
++        result = validator.validate(
++            'Authorization: bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
++        )
++        assert result.passed is False
++        assert result.blocked is True
++        assert "Bearer" in result.blocked_reason
+ 
+-    def test_11_large_code_warning(self, validator):
++    def test_16_pwd_assign_blocked(self, validator):
++        result = validator.validate('pwd = "SuperSecret123"')
++        assert result.passed is False
++        assert result.blocked is True
++        assert "pwd" in result.blocked_reason.lower() or "密码" in result.blocked_reason
++
++
++# ==================================================================
++# Warning 级别 — Phase 4.1: 仅保留大段源码/大段 SQL
++# ==================================================================
++
++class TestWarning:
++    """warning 级别 — risk_level=high，强制 pending_review。"""
++
++    def test_17_large_code_warning(self, validator):
+         """超过 50 行代码触发 warning。"""
+         lines = []
+         for i in range(55):
+             lines.append(f"    result = process_item(item_{i})")
+         content = "def process_all(items):\n" + "\n".join(lines)
+         result = validator.validate(content)
++        assert result.blocked is False
+         assert result.risk_level == "high"
+         assert any("大段源码" in w for w in result.warnings)
+ 
+-    def test_12_code_under_50_lines_passes(self, validator):
++    def test_18_code_under_50_lines_passes(self, validator):
+         """不超过 50 行代码不触发 warning。"""
+         lines = []
+         for i in range(30):
+             lines.append(f"    x = {i}")
+         content = "def foo():\n" + "\n".join(lines)
+         result = validator.validate(content)
++        assert result.blocked is False
+         assert result.risk_level == "low"
+ 
+-    def test_13_large_sql_warning(self, validator):
++    def test_19_large_sql_warning(self, validator):
+         """超过 500 字符且含 SQL 关键词触发 warning。"""
+         sql = (
+             "SELECT id, name, value, created_at, updated_at "
+@@ -122,46 +179,93 @@ class TestWarning:
+         sql += " OR customer_id IN (SELECT id FROM customers WHERE region = 'CN')"
+         assert len(sql) > 500
+         result = validator.validate(sql)
++        assert result.blocked is False
+         assert result.risk_level == "high"
+         assert any("SQL" in w for w in result.warnings)
+ 
+-    def test_14_short_sql_passes(self, validator):
++    def test_20_short_sql_passes(self, validator):
+         """不超过 500 字符的 SQL 不触发 warning。"""
+         sql = "SELECT id, name FROM orders WHERE id = 1"
+         result = validator.validate(sql)
++        assert result.blocked is False
+         assert result.risk_level == "low"
+ 
+-    def test_15_bearer_token_warning(self, validator):
+-        result = validator.validate(
+-            'bearer = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."'
+-        )
+-        assert result.risk_level == "high"
+-
+-    def test_16_combined_warnings(self, validator):
+-        """同时命中多个 warning 规则。"""
+-        content = (
+-            'api_key = "sk-longerthan20characters!!!" '
+-            'and token = "tk-longerthan20chars!!"'
+-        )
+-        result = validator.validate(content)
+-        assert result.risk_level == "high"
+-        assert len(result.warnings) >= 2
+-
+ 
+-# ------------------------------------------------------------------
++# ==================================================================
+ # 批量校验
+-# ------------------------------------------------------------------
++# ==================================================================
+ 
+ class TestBatch:
+     """批量校验。"""
+ 
+-    def test_17_validate_batch(self, validator):
++    def test_21_validate_batch(self, validator):
+         results = validator.validate_batch([
+             "normal content here",
+             "-----BEGIN RSA PRIVATE KEY----- blocked",
+-            "api_key = 'sk-12345678901234567890' warning",
++            # Phase 4.1: api_key 从 warning 升级为 blocked，仍被 blocked
++            "api_key = 'sk-12345678901234567890' is now blocked too",
+         ])
+         assert len(results) == 3
+         assert results[0].passed is True and results[0].blocked is False
+         assert results[1].blocked is True
+-        assert results[2].risk_level == "high"
++        assert results[2].blocked is True  # Phase 4.1: 升级为 blocked
++
++
++# ==================================================================
++# Phase 4.1: validate_persisted_payload 全字段校验
++# ==================================================================
++
++class TestPersistedPayload:
++    """全字段持久化校验测试。"""
++
++    def test_22_clean_payload_passes(self, validator):
++        result = validator.validate_persisted_payload(
++            title="订单查询接口规范",
++            content="订单查询接口需要添加 @Transactional 注解确保事务一致性",
++            source_evidence={
++                "file": "OrderController.java",
++                "excerpt": "@GetMapping(\"/query\")",
++                "reasoning": "缺少事务注解",
++            },
++            source_file="OrderController.java",
++            tags=["order", "transaction"],
++        )
++        assert result.passed is True
++        assert result.blocked is False
++
++    def test_23_sensitive_in_title_blocked(self, validator):
++        result = validator.validate_persisted_payload(
++            title='api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
++            content="安全的正文内容",
++        )
++        assert result.blocked is True
++        assert result.blocked_field == "title"
++
++    def test_24_sensitive_in_source_evidence_blocked(self, validator):
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文内容",
++            source_evidence={
++                "excerpt": 'token = "ghp_abcdefghijklmnopqrstuvwxyz"',
++            },
++        )
++        assert result.blocked is True
++        assert "source_evidence.excerpt" in result.blocked_field
++
++    def test_25_sensitive_in_tags_blocked(self, validator):
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文内容",
++            tags=["order", "AKIA1234567890ABCDEF"],
++        )
++        assert result.blocked is True
++        assert "tags[1]" in result.blocked_field
++
++    def test_26_sensitive_in_source_file_blocked(self, validator):
++        result = validator.validate_persisted_payload(
++            title="安全的标题",
++            content="安全的正文内容",
++            source_file="AKIA1234567890ABCDEF.config",
++        )
++        assert result.blocked is True
++        assert "source_file" in result.blocked_field

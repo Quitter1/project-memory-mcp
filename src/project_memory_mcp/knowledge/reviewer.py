@@ -46,6 +46,7 @@ class RuleBasedReviewer(ReviewerBase):
         SourceType.USER_CONFIRMED,
         SourceType.CODE_VERIFIED,
         SourceType.SQL_VERIFIED,
+        SourceType.MANUAL_INPUT,
     }
 
     # 安全的风险等级（可自动批准）

@@ -41,24 +41,32 @@ class MemoryRepository:
         content_hash: str,
         project_id: str,
         scope: Optional[str] = None,
+        active_statuses: Optional[set[str]] = None,
     ) -> Optional[MemoryItem]:
         """
         按内容哈希 + 项目 ID 查找（用于去重）。
 
         可选 scope 过滤，避免不同 scope 的同内容知识被误判重复。
+        可选 active_statuses 过滤，只匹配活跃状态（排除 rejected/deprecated/superseded）。
         """
+        conditions = ["content_hash = ?", "project_id = ?"]
+        params: list = [content_hash, project_id]
+
         if scope:
-            row = self.conn.execute(
-                "SELECT * FROM memory_items WHERE content_hash = ? AND project_id = ? "
-                "AND scope = ? ORDER BY created_at DESC LIMIT 1",
-                (content_hash, project_id, scope),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT * FROM memory_items WHERE content_hash = ? AND project_id = ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (content_hash, project_id),
-            ).fetchone()
+            conditions.append("scope = ?")
+            params.append(scope)
+
+        if active_statuses:
+            placeholders = ",".join("?" for _ in active_statuses)
+            conditions.append(f"status IN ({placeholders})")
+            params.extend(active_statuses)
+
+        where = " AND ".join(conditions)
+        row = self.conn.execute(
+            f"SELECT * FROM memory_items WHERE {where} "
+            "ORDER BY created_at DESC LIMIT 1",
+            params,
+        ).fetchone()
         if row is None:
             return None
         return self._row_to_memory_item(row)

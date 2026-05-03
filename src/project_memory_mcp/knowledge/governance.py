@@ -1,4 +1,9 @@
-"""KnowledgeGovernance — 知识治理核心，编排 propose/approve/reject/deprecate 完整流水线。"""
+"""KnowledgeGovernance — 知识治理核心，编排 propose/approve/reject/deprecate 完整流水线。
+
+Phase 4.1 变更：
+- propose_memory 全字段安全校验（validate_persisted_payload）
+- blocked/duplicate_rejected 审计日志仅保存安全摘要（不含原始敏感内容）
+"""
 
 import json
 from datetime import datetime, timezone
@@ -26,7 +31,7 @@ class KnowledgeGovernance:
     知识治理核心。
 
     编排完整流水线：
-    - propose_memory: 校验 → 去重 → 审批判定 → 写入
+    - propose_memory: 全字段校验 → 去重 → 审批判定 → 写入
     - approve_memory: 审核通过候选知识
     - reject_memory: 审核拒绝候选知识
     - deprecate_memory: 废弃已生效知识
@@ -72,8 +77,8 @@ class KnowledgeGovernance:
         提交候选知识，执行完整治理流水线。
 
         流程：
-        1. 安全校验 → blocked 则只写 audit_log，不保存原文
-        2. 去重检测 → 哈希冲突则拒绝
+        1. 全字段安全校验 → blocked 则只写 audit_log（安全摘要），不保存原文
+        2. 去重检测 → 哈希冲突则写 audit_log 后拒绝
         3. 多因素审批判定 → 自动批准或进入 pending_review
         4. 写入 memory_items + memory_tags + audit_log
         5. 返回结果
@@ -87,24 +92,37 @@ class KnowledgeGovernance:
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # === Step 1: 安全校验 ===
-        validation = self.validator.validate(content)
+        # === Step 1: 全字段安全校验 ===
+        validation = self.validator.validate_persisted_payload(
+            title=title,
+            content=content,
+            source_evidence=source_evidence,
+            source_file=source_file,
+            tags=tags,
+        )
 
         if validation.blocked:
-            # 不保存原文，仅写 audit_log
+            # 不保存原文，仅写 audit_log（安全摘要，不含原始敏感内容）
+            safe_summary = json.dumps(
+                {
+                    "title_present": bool(title and title.strip()),
+                    "content_length": len(content) if content else 0,
+                    "blocked_reason": validation.blocked_reason,
+                    "blocked_field": validation.blocked_field,
+                    "type": knowledge_type,
+                    "module": module,
+                    "source_type": source_type,
+                    "source_file": source_file,
+                    "source_line": source_line,
+                    "scope": scope,
+                },
+                ensure_ascii=False,
+            )
             self.audit.log_action(
                 action="blocked",
                 project_id=project.id,
                 old_value=None,
-                new_value=json.dumps(
-                    {
-                        "title": title,
-                        "type": knowledge_type,
-                        "module": module,
-                        "reason": validation.blocked_reason,
-                    },
-                    ensure_ascii=False,
-                ),
+                new_value=safe_summary,
                 actor=actor,
                 reason=validation.blocked_reason,
                 task_id=task_id,
@@ -120,6 +138,7 @@ class KnowledgeGovernance:
                     "passed": False,
                     "blocked": True,
                     "blocked_reason": validation.blocked_reason,
+                    "blocked_field": validation.blocked_field,
                     "warnings": validation.warnings,
                 },
                 "review_decision": {
@@ -134,6 +153,32 @@ class KnowledgeGovernance:
         )
 
         if dedup_result.is_duplicate:
+            # 写 audit_log（安全摘要，不保留完整原文）
+            safe_summary = json.dumps(
+                {
+                    "title": title,
+                    "title_present": bool(title and title.strip()),
+                    "content_length": len(content) if content else 0,
+                    "type": knowledge_type,
+                    "module": module,
+                    "source_type": source_type,
+                    "scope": scope,
+                    "duplicate_of": dedup_result.duplicate_of,
+                    "duplicate_title": dedup_result.duplicate_title,
+                },
+                ensure_ascii=False,
+            )
+            self.audit.log_action(
+                action="duplicate_rejected",
+                project_id=project.id,
+                old_value=None,
+                new_value=safe_summary,
+                actor=actor,
+                reason=f"内容哈希冲突: 已有知识 {dedup_result.duplicate_of}",
+                task_id=task_id,
+            )
+            self.repo.conn.commit()
+
             return {
                 "memory_id": "",
                 "status": KnowledgeStatus.REJECTED,
@@ -143,6 +188,7 @@ class KnowledgeGovernance:
                     "passed": validation.passed,
                     "blocked": False,
                     "blocked_reason": "",
+                    "blocked_field": "",
                     "warnings": validation.warnings,
                 },
                 "dedup": {
@@ -233,6 +279,7 @@ class KnowledgeGovernance:
                 "passed": validation.passed,
                 "blocked": False,
                 "blocked_reason": "",
+                "blocked_field": "",
                 "warnings": validation.warnings,
                 "similar_existing": semantic_similar,
             },
@@ -284,7 +331,6 @@ class KnowledgeGovernance:
         )
 
         if updates:
-            # Apply additional updates if needed
             for key, value in updates.items():
                 self.repo.conn.execute(
                     f"UPDATE memory_items SET {key} = ? WHERE id = ?",
@@ -327,6 +373,7 @@ class KnowledgeGovernance:
         审核拒绝候选知识。
 
         仅允许从 candidate/pending_review → rejected。
+        rejected 为终态，不可再次转换。
         """
         existing = self.repo.get_by_id(memory_id)
         if existing is None:
