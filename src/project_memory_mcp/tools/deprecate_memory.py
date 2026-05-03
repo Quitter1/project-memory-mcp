@@ -25,8 +25,8 @@ def handle(ctx, params: dict) -> dict:
     except Exception as exc:
         import logging
         name = type(exc).__name__
-        if "GovernanceError" in name:
-            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
+        if hasattr(exc, "code"):
+            code = exc.code
             logging.getLogger("project_memory_mcp").warning(
                 "deprecate_memory_error exc_type=%s code=%s", name, code,
             )

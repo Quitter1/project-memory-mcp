@@ -147,7 +147,15 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 6.7 — 日志接入收口（server fatal sys.exit/工具层稳定错误消息/静态检查/no_raw_traceback）。
+当前阶段：阶段 7 — 真实 MCP stdio / Claude Code 接入验证。
+
+## 硬性规则（MCP 层）
+
+- MCP server / tools / knowledge 层禁止使用 print
+- MCP server / tools / knowledge 层禁止使用 traceback.format_exc
+- MCP server / tools / knowledge 层禁止使用 logger.exception / logging.exception
+- 工具层不要通过 str(exc) 解析错误类型，应使用稳定 error code
+- CLI 脚本 scripts/ 可使用 print 输出用户可读信息
 
 ## 后续路线
 

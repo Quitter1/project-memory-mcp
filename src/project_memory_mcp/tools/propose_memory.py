@@ -54,11 +54,12 @@ def handle(ctx, params: dict) -> dict:
     except Exception as exc:
         import logging
         name = type(exc).__name__
-        if "GovernanceError" in name or "tags" in str(exc).lower():
+        if hasattr(exc, "code"):
+            code = exc.code
             logging.getLogger("project_memory_mcp").warning(
-                "propose_memory_error exc_type=%s", name,
+                "propose_memory_error exc_type=%s code=%s", name, code,
             )
-            return make_error_response("invalid_params", STABLE_MESSAGES.get("invalid_params", "参数错误"))
+            return make_error_response(code, STABLE_MESSAGES.get(code, "参数错误"))
         logging.getLogger("project_memory_mcp").error(
             "propose_memory_exception exc_type=%s", name,
         )

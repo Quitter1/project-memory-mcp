@@ -4,8 +4,6 @@ Phase 6.3: 所有响应包含 request_id，tool 调用写入日志。
 """
 
 import time
-import traceback
-import sys
 import logging
 from typing import Optional
 

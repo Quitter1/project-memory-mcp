@@ -1,0 +1,323 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a314b8f..181e279 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,15 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 6.7 — 日志接入收口（server fatal sys.exit/工具层稳定错误消息/静态检查/no_raw_traceback）。
++当前阶段：阶段 7 — 真实 MCP stdio / Claude Code 接入验证。
++
++## 硬性规则（MCP 层）
++
++- MCP server / tools / knowledge 层禁止使用 print
++- MCP server / tools / knowledge 层禁止使用 traceback.format_exc
++- MCP server / tools / knowledge 层禁止使用 logger.exception / logging.exception
++- 工具层不要通过 str(exc) 解析错误类型，应使用稳定 error code
++- CLI 脚本 scripts/ 可使用 print 输出用户可读信息
+ 
+ ## 后续路线
+ 
+diff --git a/README.md b/README.md
+index 786e426..7a129ed 100644
+--- a/README.md
++++ b/README.md
+@@ -78,6 +78,19 @@ python -m project_memory_mcp
+ | Phase 4~4.4 | 知识治理 + 安全收口 |
+ | Phase 5~5.2 | MCP 工具 + 封装层收口 |
+ | Phase 6 | 端到端集成测试（完成） |
++| Phase 7 | 真实 MCP stdio / Claude Code 接入验证 |
++
++## Phase 7：真实 MCP 接入验证
++
++Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
++
++```bash
++# 验证 MCP server 可启动
++python scripts/check_mcp_server.py
++
++# 真实 MCP stdio client 调用测试
++python scripts/test_mcp_stdio_client.py
++```
+ 
+ ## 本地完整验证
+ 
+diff --git a/src/project_memory_mcp/knowledge/governance.py b/src/project_memory_mcp/knowledge/governance.py
+index de00173..cb4a07c 100644
+--- a/src/project_memory_mcp/knowledge/governance.py
++++ b/src/project_memory_mcp/knowledge/governance.py
+@@ -23,7 +23,9 @@ from .reviewer import RuleBasedReviewer, ReviewDecision
+ 
+ class GovernanceError(Exception):
+     """治理操作错误。"""
+-    pass
++    def __init__(self, message: str, code: str = "governance_error"):
++        super().__init__(message)
++        self.code = code
+ 
+ 
+ # Phase 4.4: blocked_field 脱敏 — 不允许敏感字符串出现在审计日志和返回值中
+@@ -111,14 +113,14 @@ class KnowledgeGovernance:
+         5. 返回结果
+         """
+         if not title or not title.strip():
+-            raise GovernanceError("title 不能为空")
++            raise GovernanceError("title 不能为空", code="invalid_params")
+         if not content or not content.strip():
+-            raise GovernanceError("content 不能为空")
++            raise GovernanceError("content 不能为空", code="invalid_params")
+         if not project or not project.id:
+-            raise GovernanceError("project 不能为空")
++            raise GovernanceError("project 不能为空", code="invalid_params")
+         if tags is not None:
+             if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+-                raise GovernanceError("tags 必须是字符串列表")
++                raise GovernanceError("tags 必须是字符串列表", code="invalid_params")
+ 
+         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+ 
+@@ -341,12 +343,13 @@ class KnowledgeGovernance:
+         """
+         existing = self.repo.get_by_id(memory_id)
+         if existing is None:
+-            raise GovernanceError(f"知识不存在: {memory_id}")
++            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
+ 
+         if not LifecycleManager.is_reviewable(existing.status):
+             raise GovernanceError(
+                 f"知识状态 {existing.status} 不可审核，仅 "
+-                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核"
++                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核",
++                code="invalid_state",
+             )
+ 
+         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.APPROVED)
+@@ -410,12 +413,13 @@ class KnowledgeGovernance:
+         """
+         existing = self.repo.get_by_id(memory_id)
+         if existing is None:
+-            raise GovernanceError(f"知识不存在: {memory_id}")
++            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
+ 
+         if not LifecycleManager.is_reviewable(existing.status):
+             raise GovernanceError(
+                 f"知识状态 {existing.status} 不可审核，仅 "
+-                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核"
++                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核",
++                code="invalid_state",
+             )
+ 
+         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.REJECTED)
+@@ -465,12 +469,13 @@ class KnowledgeGovernance:
+         """
+         existing = self.repo.get_by_id(memory_id)
+         if existing is None:
+-            raise GovernanceError(f"知识不存在: {memory_id}")
++            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
+ 
+         if not LifecycleManager.is_deprecatable(existing.status):
+             raise GovernanceError(
+                 f"知识状态 {existing.status} 不可废弃，仅 "
+-                f"{sorted(LifecycleManager.DEPRECATABLE_STATUSES)} 可废弃"
++                f"{sorted(LifecycleManager.DEPRECATABLE_STATUSES)} 可废弃",
++                code="invalid_state",
+             )
+ 
+         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.DEPRECATED)
+diff --git a/src/project_memory_mcp/server.py b/src/project_memory_mcp/server.py
+index d99f62a..62df575 100644
+--- a/src/project_memory_mcp/server.py
++++ b/src/project_memory_mcp/server.py
+@@ -10,7 +10,6 @@ MCP Server — 基于 mcp==1.27.0 FastMCP，不手写 JSON-RPC。
+ """
+ 
+ import os
+-import sys
+ from pathlib import Path
+ 
+ # 源码相对 fallback 根目录
+@@ -79,9 +78,10 @@ def _create_context():
+     config_dir, db_path = _resolve_project_root()
+ 
+     if not (config_dir / "projects.yml").exists():
+-        msg = f"[server] 找不到 projects.yml，请检查 config_dir: {config_dir}"
+-        print(msg, file=sys.stderr)
+-        raise FileNotFoundError(msg)
++        import logging
++        logger = logging.getLogger("project_memory_mcp")
++        logger.error("config_not_found config_dir=%s", config_dir)
++        raise FileNotFoundError("找不到 projects.yml，请检查 PROJECT_MEMORY_CONFIG_DIR")
+ 
+     ctx = AppContext(config_dir=config_dir, db_path=db_path)
+     ctx.sync_projects()
+diff --git a/src/project_memory_mcp/tools/approve_memory.py b/src/project_memory_mcp/tools/approve_memory.py
+index 0882b77..d5e9c21 100644
+--- a/src/project_memory_mcp/tools/approve_memory.py
++++ b/src/project_memory_mcp/tools/approve_memory.py
+@@ -26,8 +26,8 @@ def handle(ctx, params: dict) -> dict:
+     except Exception as exc:
+         import logging
+         name = type(exc).__name__
+-        if "GovernanceError" in name:
+-            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++        if hasattr(exc, "code"):
++            code = exc.code
+             logging.getLogger("project_memory_mcp").warning(
+                 "approve_memory_error exc_type=%s code=%s", name, code,
+             )
+diff --git a/src/project_memory_mcp/tools/deprecate_memory.py b/src/project_memory_mcp/tools/deprecate_memory.py
+index cc84663..69fe9b4 100644
+--- a/src/project_memory_mcp/tools/deprecate_memory.py
++++ b/src/project_memory_mcp/tools/deprecate_memory.py
+@@ -25,8 +25,8 @@ def handle(ctx, params: dict) -> dict:
+     except Exception as exc:
+         import logging
+         name = type(exc).__name__
+-        if "GovernanceError" in name:
+-            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++        if hasattr(exc, "code"):
++            code = exc.code
+             logging.getLogger("project_memory_mcp").warning(
+                 "deprecate_memory_error exc_type=%s code=%s", name, code,
+             )
+diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
+index 63bd799..bddf7c0 100644
+--- a/src/project_memory_mcp/tools/handlers.py
++++ b/src/project_memory_mcp/tools/handlers.py
+@@ -4,8 +4,6 @@ Phase 6.3: 所有响应包含 request_id，tool 调用写入日志。
+ """
+ 
+ import time
+-import traceback
+-import sys
+ import logging
+ from typing import Optional
+ 
+diff --git a/src/project_memory_mcp/tools/propose_memory.py b/src/project_memory_mcp/tools/propose_memory.py
+index cbd102d..903750e 100644
+--- a/src/project_memory_mcp/tools/propose_memory.py
++++ b/src/project_memory_mcp/tools/propose_memory.py
+@@ -54,11 +54,12 @@ def handle(ctx, params: dict) -> dict:
+     except Exception as exc:
+         import logging
+         name = type(exc).__name__
+-        if "GovernanceError" in name or "tags" in str(exc).lower():
++        if hasattr(exc, "code"):
++            code = exc.code
+             logging.getLogger("project_memory_mcp").warning(
+-                "propose_memory_error exc_type=%s", name,
++                "propose_memory_error exc_type=%s code=%s", name, code,
+             )
+-            return make_error_response("invalid_params", STABLE_MESSAGES.get("invalid_params", "参数错误"))
++            return make_error_response(code, STABLE_MESSAGES.get(code, "参数错误"))
+         logging.getLogger("project_memory_mcp").error(
+             "propose_memory_exception exc_type=%s", name,
+         )
+diff --git a/src/project_memory_mcp/tools/reject_memory.py b/src/project_memory_mcp/tools/reject_memory.py
+index 6a3c128..a8b16cf 100644
+--- a/src/project_memory_mcp/tools/reject_memory.py
++++ b/src/project_memory_mcp/tools/reject_memory.py
+@@ -25,8 +25,8 @@ def handle(ctx, params: dict) -> dict:
+     except Exception as exc:
+         import logging
+         name = type(exc).__name__
+-        if "GovernanceError" in name:
+-            code = "memory_not_found" if "不存在" in str(exc) else "invalid_state"
++        if hasattr(exc, "code"):
++            code = exc.code
+             logging.getLogger("project_memory_mcp").warning(
+                 "reject_memory_error exc_type=%s code=%s", name, code,
+             )
+diff --git a/tests/test_no_raw_traceback.py b/tests/test_no_raw_traceback.py
+index 16d2e00..3700994 100644
+--- a/tests/test_no_raw_traceback.py
++++ b/tests/test_no_raw_traceback.py
+@@ -1,41 +1,54 @@
+ """
+-静态检查 — src/project_memory_mcp/ 下不允许出现直接 print traceback 或 logger.exception。
++静态检查 — MCP server/tools/knowledge 层不允许 print / traceback / logger.exception。
+ 
+-CLI 脚本（scripts/）中的 print 不受此限制。
++使用 AST 扫描，不依赖脆弱的文本匹配。
+ """
+ 
++import ast
+ from pathlib import Path
+ 
+ _SRC = Path(__file__).parent.parent / "src" / "project_memory_mcp"
+ 
+-_FORBIDDEN = [
+-    "traceback.format_exc(",
+-    'print(...file=sys.stderr',
+-    "logger.exception(",
+-]
+-
+-
+-def test_no_traceback_in_tools():
+-    """tools/ 目录下不允许 traceback.format_exc / print stderr / logger.exception。"""
+-    tools_dir = _SRC / "tools"
+-    for f in tools_dir.glob("*.py"):
+-        content = f.read_text(encoding="utf-8")
+-        for pattern in _FORBIDDEN:
+-            assert pattern not in content, f"{f.name}: 包含禁止的模式 {pattern}"
+-
+-
+-def test_no_traceback_in_server():
+-    """server.py 不允许 traceback.format_exc / logger.exception。"""
+-    f = _SRC / "server.py"
+-    content = f.read_text(encoding="utf-8")
+-    for pattern in _FORBIDDEN:
+-        assert pattern not in content, f"server.py: 包含禁止的模式 {pattern}"
+-
+-
+-def test_no_traceback_in_knowledge():
+-    """knowledge/ 目录下不允许 traceback.format_exc / logger.exception。"""
+-    kd = _SRC / "knowledge"
+-    for f in kd.glob("*.py"):
+-        content = f.read_text(encoding="utf-8")
+-        for pattern in _FORBIDDEN:
+-            assert pattern not in content, f"{f.name}: 包含禁止的模式 {pattern}"
++
++def _scan_file(filepath: Path) -> list[str]:
++    """返回文件中违规项的列表。"""
++    issues: list[str] = []
++    tree = ast.parse(filepath.read_text(encoding="utf-8"), filename=str(filepath.name))
++
++    for node in ast.walk(tree):
++        # 检测 print() 调用
++        if isinstance(node, ast.Call):
++            if isinstance(node.func, ast.Name) and node.func.id == "print":
++                issues.append(f"line {node.lineno}: print() — MCP 层禁止 print，请使用 logger")
++            # 检测 traceback.format_exc()
++            if isinstance(node.func, ast.Attribute):
++                if (
++                    isinstance(node.func.value, ast.Name)
++                    and node.func.value.id == "traceback"
++                    and node.func.attr == "format_exc"
++                ):
++                    issues.append(f"line {node.lineno}: traceback.format_exc() — 禁止")
++            # 检测 logger.exception() / logging.exception()
++            if isinstance(node.func, ast.Attribute) and node.func.attr == "exception":
++                if isinstance(node.func.value, ast.Name):
++                    if node.func.value.id in ("logger", "logging"):
++                        issues.append(f"line {node.lineno}: logger.exception() — 禁止，请使用 logger.error")
++
++    return issues
++
++
++def test_no_print_in_server():
++    issues = _scan_file(_SRC / "server.py")
++    assert not issues, f"server.py: {issues}"
++
++
++def test_no_print_in_tools():
++    for f in sorted((_SRC / "tools").glob("*.py")):
++        issues = _scan_file(f)
++        assert not issues, f"{f.name}: {issues}"
++
++
++def test_no_forbidden_in_knowledge():
++    for f in sorted((_SRC / "knowledge").glob("*.py")):
++        issues = _scan_file(f)
++        assert not issues, f"{f.name}: {issues}"

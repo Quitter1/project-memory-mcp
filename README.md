@@ -78,6 +78,19 @@ python -m project_memory_mcp
 | Phase 4~4.4 | 知识治理 + 安全收口 |
 | Phase 5~5.2 | MCP 工具 + 封装层收口 |
 | Phase 6 | 端到端集成测试（完成） |
+| Phase 7 | 真实 MCP stdio / Claude Code 接入验证 |
+
+## Phase 7：真实 MCP 接入验证
+
+Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
+
+```bash
+# 验证 MCP server 可启动
+python scripts/check_mcp_server.py
+
+# 真实 MCP stdio client 调用测试
+python scripts/test_mcp_stdio_client.py
+```
 
 ## 本地完整验证
 

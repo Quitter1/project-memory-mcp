@@ -23,7 +23,9 @@ from .reviewer import RuleBasedReviewer, ReviewDecision
 
 class GovernanceError(Exception):
     """治理操作错误。"""
-    pass
+    def __init__(self, message: str, code: str = "governance_error"):
+        super().__init__(message)
+        self.code = code
 
 
 # Phase 4.4: blocked_field 脱敏 — 不允许敏感字符串出现在审计日志和返回值中
@@ -111,14 +113,14 @@ class KnowledgeGovernance:
         5. 返回结果
         """
         if not title or not title.strip():
-            raise GovernanceError("title 不能为空")
+            raise GovernanceError("title 不能为空", code="invalid_params")
         if not content or not content.strip():
-            raise GovernanceError("content 不能为空")
+            raise GovernanceError("content 不能为空", code="invalid_params")
         if not project or not project.id:
-            raise GovernanceError("project 不能为空")
+            raise GovernanceError("project 不能为空", code="invalid_params")
         if tags is not None:
             if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-                raise GovernanceError("tags 必须是字符串列表")
+                raise GovernanceError("tags 必须是字符串列表", code="invalid_params")
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -341,12 +343,13 @@ class KnowledgeGovernance:
         """
         existing = self.repo.get_by_id(memory_id)
         if existing is None:
-            raise GovernanceError(f"知识不存在: {memory_id}")
+            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
 
         if not LifecycleManager.is_reviewable(existing.status):
             raise GovernanceError(
                 f"知识状态 {existing.status} 不可审核，仅 "
-                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核"
+                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核",
+                code="invalid_state",
             )
 
         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.APPROVED)
@@ -410,12 +413,13 @@ class KnowledgeGovernance:
         """
         existing = self.repo.get_by_id(memory_id)
         if existing is None:
-            raise GovernanceError(f"知识不存在: {memory_id}")
+            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
 
         if not LifecycleManager.is_reviewable(existing.status):
             raise GovernanceError(
                 f"知识状态 {existing.status} 不可审核，仅 "
-                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核"
+                f"{sorted(LifecycleManager.REVIEWABLE_STATUSES)} 可审核",
+                code="invalid_state",
             )
 
         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.REJECTED)
@@ -465,12 +469,13 @@ class KnowledgeGovernance:
         """
         existing = self.repo.get_by_id(memory_id)
         if existing is None:
-            raise GovernanceError(f"知识不存在: {memory_id}")
+            raise GovernanceError(f"知识不存在: {memory_id}", code="memory_not_found")
 
         if not LifecycleManager.is_deprecatable(existing.status):
             raise GovernanceError(
                 f"知识状态 {existing.status} 不可废弃，仅 "
-                f"{sorted(LifecycleManager.DEPRECATABLE_STATUSES)} 可废弃"
+                f"{sorted(LifecycleManager.DEPRECATABLE_STATUSES)} 可废弃",
+                code="invalid_state",
             )
 
         LifecycleManager.validate_transition(existing.status, KnowledgeStatus.DEPRECATED)

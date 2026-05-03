@@ -10,7 +10,6 @@ MCP Server — 基于 mcp==1.27.0 FastMCP，不手写 JSON-RPC。
 """
 
 import os
-import sys
 from pathlib import Path
 
 # 源码相对 fallback 根目录
@@ -79,9 +78,10 @@ def _create_context():
     config_dir, db_path = _resolve_project_root()
 
     if not (config_dir / "projects.yml").exists():
-        msg = f"[server] 找不到 projects.yml，请检查 config_dir: {config_dir}"
-        print(msg, file=sys.stderr)
-        raise FileNotFoundError(msg)
+        import logging
+        logger = logging.getLogger("project_memory_mcp")
+        logger.error("config_not_found config_dir=%s", config_dir)
+        raise FileNotFoundError("找不到 projects.yml，请检查 PROJECT_MEMORY_CONFIG_DIR")
 
     ctx = AppContext(config_dir=config_dir, db_path=db_path)
     ctx.sync_projects()
