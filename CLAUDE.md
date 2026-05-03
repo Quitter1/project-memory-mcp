@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 7 — 真实 MCP stdio / Claude Code 接入验证。
+当前阶段：阶段 7.2 — MCP stdio 客户端补强（缺mcp exit语义/argparse/importorskip/--allow-missing-mcp）。
 
 ## 硬性规则（MCP 层）
 

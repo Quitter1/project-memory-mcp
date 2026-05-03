@@ -2,11 +2,15 @@
 
 ## 接入前检查
 
-运行以下命令确认 MCP server 可启动：
-
 ```bash
+# 推荐：临时库 + demo 数据，不污染当前 data/memory.db
+python scripts/test_mcp_stdio_client.py --seed-demo
+
+# 如果要用当前真实数据库验证（会写入测试知识，不推荐频繁使用）
+python scripts/test_mcp_stdio_client.py --use-current-db
+
+# 基础检查
 python scripts/check_mcp_server.py
-python scripts/test_mcp_stdio_client.py
 python scripts/dev_check.py
 python scripts/diagnose.py
 ```

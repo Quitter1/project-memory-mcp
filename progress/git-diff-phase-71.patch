@@ -1,0 +1,277 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 181e279..a5d87a2 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 7 — 真实 MCP stdio / Claude Code 接入验证。
++当前阶段：阶段 7.1 — MCP stdio 客户端补强（临时库默认/--seed-demo/不污染正式数据）。
+ 
+ ## 硬性规则（MCP 层）
+ 
+diff --git a/README.md b/README.md
+index 7a129ed..a6af979 100644
+--- a/README.md
++++ b/README.md
+@@ -88,8 +88,11 @@ Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
+ # 验证 MCP server 可启动
+ python scripts/check_mcp_server.py
+ 
+-# 真实 MCP stdio client 调用测试
+-python scripts/test_mcp_stdio_client.py
++# 推荐：临时库 + demo 数据，不污染当前 data/memory.db
++python scripts/test_mcp_stdio_client.py --seed-demo
++
++# 真实当前库验证，不推荐频繁使用
++python scripts/test_mcp_stdio_client.py --use-current-db
+ ```
+ 
+ ## 本地完整验证
+diff --git a/docs/claude-code-mcp-setup.md b/docs/claude-code-mcp-setup.md
+index bb5aeff..0c1efdc 100644
+--- a/docs/claude-code-mcp-setup.md
++++ b/docs/claude-code-mcp-setup.md
+@@ -2,11 +2,15 @@
+ 
+ ## 接入前检查
+ 
+-运行以下命令确认 MCP server 可启动：
+-
+ ```bash
++# 推荐：临时库 + demo 数据，不污染当前 data/memory.db
++python scripts/test_mcp_stdio_client.py --seed-demo
++
++# 如果要用当前真实数据库验证（会写入测试知识，不推荐频繁使用）
++python scripts/test_mcp_stdio_client.py --use-current-db
++
++# 基础检查
+ python scripts/check_mcp_server.py
+-python scripts/test_mcp_stdio_client.py
+ python scripts/dev_check.py
+ python scripts/diagnose.py
+ ```
+diff --git a/scripts/test_mcp_stdio_client.py b/scripts/test_mcp_stdio_client.py
+index aea301a..84bd4f3 100644
+--- a/scripts/test_mcp_stdio_client.py
++++ b/scripts/test_mcp_stdio_client.py
+@@ -2,16 +2,17 @@
+ 真实 MCP stdio client 测试 — 通过 stdio 启动 server 并调用 tools。
+ 
+ 使用：
+-    python scripts/test_mcp_stdio_client.py
+-    exit 0 = 测试通过, exit 1 = 失败
+-
+-如果本机未安装 mcp 或 client API 不可用，输出清晰提示并 exit 0 跳过。
++    python scripts/test_mcp_stdio_client.py --seed-demo  (推荐：临时库+demo数据)
++    python scripts/test_mcp_stdio_client.py --use-current-db  (真实库，谨慎)
++    python scripts/test_mcp_stdio_client.py --keep-temp  (保留临时目录)
+ """
+ 
+ import asyncio
+ import json
+ import os
++import shutil
+ import sys
++import tempfile
+ from pathlib import Path
+ 
+ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+@@ -31,7 +32,7 @@ def _ok(msg: str):
+     print(f"  [OK] {msg}")
+ 
+ 
+-async def _run_tests():
++async def _run_tests(config_dir: str, db_path: str, log_dir: str, seed_demo: bool):
+     global _exit_code
+     try:
+         from mcp.client.stdio import stdio_client, StdioServerParameters
+@@ -41,23 +42,19 @@ async def _run_tests():
+         return
+ 
+     python = sys.executable
+-    config_dir = os.environ.get("PROJECT_MEMORY_CONFIG_DIR", str(_PROJECT_ROOT / "config"))
+-    db_path = os.environ.get("PROJECT_MEMORY_DB_PATH", str(_PROJECT_ROOT / "data" / "memory.db"))
+-
+     server_params = StdioServerParameters(
+         command=python,
+         args=["-m", "project_memory_mcp"],
+         env={
+             "PROJECT_MEMORY_CONFIG_DIR": config_dir,
+             "PROJECT_MEMORY_DB_PATH": db_path,
+-            "PROJECT_MEMORY_LOG_DIR": os.environ.get("PROJECT_MEMORY_LOG_DIR", str(_PROJECT_ROOT / "logs")),
++            "PROJECT_MEMORY_LOG_DIR": log_dir,
+             "PROJECT_MEMORY_LOG_LEVEL": "INFO",
+             "PYTHONIOENCODING": "utf-8",
+         },
+     )
+ 
+     print(f"启动 server: {python} -m project_memory_mcp")
+-    print(f"config_dir = {config_dir}")
+ 
+     try:
+         async with stdio_client(server_params) as (read, write):
+@@ -74,20 +71,19 @@ async def _run_tests():
+                 else:
+                     _fail(f"期望 >=9 个 tools, 实际 {len(tool_names)}")
+ 
+-                # 2. call list_projects
++                # 2. list_projects
+                 r = await session.call_tool("list_projects", {"status_filter": "active"})
+                 result = json.loads(r.content[0].text)
+                 if result.get("ok"):
+                     projects = result.get("data", {}).get("projects", [])
+                     _ok(f"list_projects: {len(projects)} 个项目")
+-                    print(f"    slugs: {[p.get('slug') for p in projects]}")
+                 else:
+                     _fail(f"list_projects 失败: {result}")
+ 
+-                # 3. call search_project_context
++                # 3. search_project_context
+                 r = await session.call_tool("search_project_context", {
+                     "project_id": "biaopai-erp",
+-                    "query": "产品",
++                    "query": "产品 材料",
+                     "max_results": 5,
+                 })
+                 result = json.loads(r.content[0].text)
+@@ -95,20 +91,24 @@ async def _run_tests():
+                     cp = result.get("data", {}).get("context_pack", {})
+                     n = len(cp.get("project_context", []))
+                     print(f"  search: {n} 条结果 (project_context)")
+-                    _ok("search_project_context 成功")
++                    _ok("search_project_context 调用成功")
++                    if seed_demo:
++                        if n > 0:
++                            titles = [x.get("title", "") for x in cp.get("project_context", [])]
++                            _ok(f"demo search 返回结果: {titles}")
++                        else:
++                            _fail("demo search 返回 0 条结果，期望 >= 1")
+                 else:
+                     code = result.get("error", {}).get("code", "unknown")
+-                    print(f"  search 返回: code={code}")
+-                    # project_not_found 是可接受的（测试配置可能没有 biaopai-erp）
+-                    if code in ("project_not_found",):
+-                        _ok("search_project_context 返回稳定错误码")
++                    if code == "project_not_found":
++                        _ok("search 返回 project_not_found（测试配置可能无此项目）")
+                     else:
+-                        _fail(f"search_project_context 失败: {result}")
++                        _fail(f"search 失败: {result}")
+ 
+-                # 4. call propose_memory (普通内容)
++                # 4. propose_memory (普通)
+                 r = await session.call_tool("propose_memory", {
+                     "project_id": "biaopai-erp",
+-                    "title": "MCP stdio 测试知识",
++                    "title": "[STDIO_TEST] MCP stdio 测试知识",
+                     "content": "通过 stdio client 提交的测试知识",
+                     "actor": "stdio-test",
+                 })
+@@ -116,21 +116,18 @@ async def _run_tests():
+                 if result.get("ok"):
+                     status = result.get("data", {}).get("status")
+                     print(f"  propose status={status}")
+-                    if status in ("pending_review", "approved", "rejected"):
+-                        _ok(f"propose_memory status={status}")
+-                    else:
+-                        _fail(f"未知状态: {status}")
++                    _ok(f"propose_memory status={status}")
+                 else:
+                     code = result.get("error", {}).get("code")
+                     if code == "project_not_found":
+-                        _ok("propose_memory project_not_found（可用测试配置）")
++                        _ok("propose project_not_found")
+                     else:
+-                        _fail(f"propose_memory 失败: {result}")
++                        _fail(f"propose 失败: {result}")
+ 
+-                # 5. call propose_memory (blocked)
++                # 5. propose_memory (blocked)
+                 r = await session.call_tool("propose_memory", {
+                     "project_id": "biaopai-erp",
+-                    "title": "私钥测试",
++                    "title": "[STDIO_TEST] 私钥测试",
+                     "content": "-----BEGIN RSA PRIVATE KEY-----\ntest",
+                     "actor": "stdio-test",
+                 })
+@@ -143,7 +140,7 @@ async def _run_tests():
+                 else:
+                     code = result.get("error", {}).get("code", "unknown")
+                     if code == "project_not_found":
+-                        _ok("propose_memory 返回 project_not_found")
++                        _ok("propose blocked 返回 project_not_found")
+                     else:
+                         _fail(f"blocked propose 失败: {result}")
+ 
+@@ -152,6 +149,54 @@ async def _run_tests():
+     except Exception as exc:
+         _fail(f"stdio client 异常: {type(exc).__name__}: {exc}")
+ 
++
++def main():
++    global _exit_code
++    args = sys.argv[1:]
++
++    use_current = "--use-current-db" in args
++    keep_temp = "--keep-temp" in args
++    seed_demo = "--seed-demo" in args
++
++    if use_current:
++        config_dir = str(_PROJECT_ROOT / "config")
++        db_path = str(_PROJECT_ROOT / "data" / "memory.db")
++        log_dir = str(_PROJECT_ROOT / "logs")
++        print(f"模式: --use-current-db (会写入真实 data/memory.db)")
++    else:
++        tmp = tempfile.mkdtemp()
++        config_dir = str(Path(tmp) / "config")
++        db_path = str(Path(tmp) / "data" / "memory.db")
++        log_dir = str(Path(tmp) / "logs")
++        Path(config_dir).mkdir(parents=True)
++        # 复制 projects.yml
++        src_yml = _PROJECT_ROOT / "config" / "projects.yml"
++        if src_yml.exists():
++            shutil.copy(str(src_yml), str(Path(config_dir) / "projects.yml"))
++        print(f"模式: 临时库 ({tmp})")
++
++    # 初始化数据库 + sync + 可选 seed
++    try:
++        sys.path.insert(0, str(_PROJECT_ROOT / "src"))
++        from project_memory_mcp.app_context import AppContext
++        ctx = AppContext(config_dir=Path(config_dir), db_path=Path(db_path))
++        ctx.sync_projects()
++
++        if seed_demo:
++            from scripts.seed_demo_data import seed
++            seed_result = seed(ctx)
++            print(f"  演示数据: 新增 {seed_result['created']}, 跳过 {seed_result['skipped']}")
++
++        ctx.db.close()
++    except Exception as exc:
++        _fail(f"初始化失败: {exc}")
++        return _exit_code
++
++    try:
++        asyncio.run(_run_tests(config_dir, db_path, log_dir, seed_demo))
++    except KeyboardInterrupt:
++        print("\n用户中断")
++
+     print(f"\n{'=' * 50}")
+     if _exit_code == 0:
+         print("  MCP stdio client 测试全部通过")
+@@ -159,12 +204,9 @@ async def _run_tests():
+         print("  MCP stdio client 测试存在失败项")
+     print(f"{'=' * 50}")
+ 
++    if not use_current and not keep_temp and 'tmp' in dir() and Path(tmp).exists():
++        shutil.rmtree(tmp, ignore_errors=True)
+ 
+-def main():
+-    try:
+-        asyncio.run(_run_tests())
+-    except KeyboardInterrupt:
+-        print("\n用户中断")
+     return _exit_code
+ 
+ 

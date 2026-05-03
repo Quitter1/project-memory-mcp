@@ -88,8 +88,11 @@ Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
 # 验证 MCP server 可启动
 python scripts/check_mcp_server.py
 
-# 真实 MCP stdio client 调用测试
-python scripts/test_mcp_stdio_client.py
+# 推荐：临时库 + demo 数据，不污染当前 data/memory.db
+python scripts/test_mcp_stdio_client.py --seed-demo
+
+# 真实当前库验证，不推荐频繁使用
+python scripts/test_mcp_stdio_client.py --use-current-db
 ```
 
 ## 本地完整验证
