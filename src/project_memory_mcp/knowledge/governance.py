@@ -73,12 +73,14 @@ class KnowledgeGovernance:
         validator: ContentValidator,
         deduplicator: Deduplicator,
         reviewer: RuleBasedReviewer,
+        indexer=None,
     ):
         self.repo = repo
         self.audit = audit
         self.validator = validator
         self.deduplicator = deduplicator
         self.reviewer = reviewer
+        self.indexer = indexer
 
     # ------------------------------------------------------------------
     # propose_memory
@@ -387,6 +389,13 @@ class KnowledgeGovernance:
 
         self.repo.conn.commit()
 
+        # Phase 10: 索引向量
+        if self.indexer is not None and updated is not None:
+            try:
+                self.indexer.index_memory(updated)
+            except Exception:
+                pass
+
         return {
             "memory_id": memory_id,
             "status": KnowledgeStatus.APPROVED,
@@ -446,6 +455,13 @@ class KnowledgeGovernance:
 
         self.repo.conn.commit()
 
+        # Phase 10: 删除向量
+        if self.indexer is not None:
+            try:
+                self.indexer.delete_memory(memory_id)
+            except Exception:
+                pass
+
         return {
             "memory_id": memory_id,
             "status": KnowledgeStatus.REJECTED,
@@ -500,6 +516,13 @@ class KnowledgeGovernance:
         )
 
         self.repo.conn.commit()
+
+        # Phase 10: 删除向量
+        if self.indexer is not None:
+            try:
+                self.indexer.delete_memory(memory_id)
+            except Exception:
+                pass
 
         return {
             "memory_id": memory_id,

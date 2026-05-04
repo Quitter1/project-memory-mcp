@@ -1,0 +1,261 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index da9edf4..6712c5f 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,16 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 8.2 — 真实使用回路收口（cleanup三组分类/--include-terminal/rejected显示/diagnose一致性）。
++当前阶段：阶段 10 — Qdrant + embedding + 向量索引 + 混合搜索基础框架。
++
++## Qdrant 规则
++
++- Qdrant 是派生索引，不是事实源
++- 不得从 Qdrant payload 拼最终答案，必须回 SQLite 取完整 MemoryItem
++- Qdrant 不可用时自动 fallback keyword
++- Qdrant payload 不存 content/source_evidence 原文
++- rejected/deprecated 不参与搜索，也不保留向量
++- 新增向量日志必须脱敏
+ 
+ ## 真实使用规则
+ 
+diff --git a/config/server.yml b/config/server.yml
+index 97a1b86..da5b9b6 100644
+--- a/config/server.yml
++++ b/config/server.yml
+@@ -23,24 +23,36 @@ database:
+   path: "data/memory.db"
+   backup_enabled: false              # MVP 阶段暂不开启自动备份
+ 
+-# Qdrant 连接（MVP 阶段不启用，仅预留配置）
++# Qdrant 连接
+ qdrant:
+   enabled: false
+   host: "127.0.0.1"
+   http_port: 6333
+   grpc_port: 6334
++  prefer_grpc: false
++  collection: "project_memory_items"
+   executable_path: "qdrant/qdrant.exe"
+   storage_path: "qdrant/storage"
+-  collection: "project_memory_default"
+-  api_key: null
+   timeout_seconds: 10
+ 
+ # Embedding 配置
+ embedding:
+-  provider: "mock"                    # mock | http | local（MVP 用 mock）
+-  model: "mock-embedding-v1"
+-  dimension: 768
+-  batch_size: 32
++  enabled: false
++  provider: "hashing"                  # hashing | http
++  dim: 512
++  model: "hashing-v1"
++  http:
++    base_url: "http://127.0.0.1:8008"
++    endpoint: "/embed_text"
++    timeout_seconds: 30
++
++# 搜索配置
++search:
++  mode: "hybrid"                       # keyword | vector | hybrid
++  keyword_weight: 0.55
++  vector_weight: 0.45
++  vector_top_k: 30
++  fallback_to_keyword: true
+ 
+ # 审核器
+ reviewer:
+diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
+index d1f3d77..cea19d6 100644
+--- a/src/project_memory_mcp/app_context.py
++++ b/src/project_memory_mcp/app_context.py
+@@ -46,6 +46,9 @@ class AppContext:
+     project_manager: ProjectManager = field(init=False)
+     profile_builder: ProjectProfileBuilder = field(init=False)
+     search_service: KnowledgeSearchService = field(init=False)
++    embedder: object = field(init=False, default=None)
++    vector_store: object = field(init=False, default=None)
++    vector_indexer: object = field(init=False, default=None)
+     validator: ContentValidator = field(init=False)
+     deduplicator: Deduplicator = field(init=False)
+     reviewer: RuleBasedReviewer = field(init=False)
+@@ -73,11 +76,12 @@ class AppContext:
+         self.project_manager = ProjectManager(self.project_repo, self.config_loader)
+         self.profile_builder = ProjectProfileBuilder(self.memory_repo, self.project_repo)
+ 
+-        # 5. 检索服务（MVP 不接 Qdrant）
++        # 5. 检索服务 + 向量
++        self._init_vector()
+         self.search_service = KnowledgeSearchService(
+             conn=self.conn,
+-            vector_store=None,
+-            embedder=None,
++            vector_store=self.vector_store,
++            embedder=self.embedder,
+         )
+ 
+         # 6. 知识治理
+@@ -94,6 +98,7 @@ class AppContext:
+             validator=self.validator,
+             deduplicator=self.deduplicator,
+             reviewer=self.reviewer,
++            indexer=self.vector_indexer,
+         )
+ 
+         # 7. 启动就绪日志
+@@ -135,6 +140,69 @@ class AppContext:
+             "app_context_start config_dir=%s db_path=%s", self.config_dir, self.db_path,
+         )
+ 
++    def _init_vector(self):
++        """初始化向量组件（Qdrant disabled 时跳过）。"""
++        import yaml
++        server_yml = self.config_dir / "server.yml"
++        qdrant_cfg = {}
++        embed_cfg = {}
++        if server_yml.exists():
++            try:
++                raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
++                qdrant_cfg = raw.get("qdrant", {}) if raw else {}
++                embed_cfg = raw.get("embedding", {}) if raw else {}
++            except Exception:
++                pass
++
++        if not qdrant_cfg.get("enabled", False) and not embed_cfg.get("enabled", False):
++            self.embedder = None
++            self.vector_store = None
++            self.vector_indexer = None
++            return
++
++        # Embedding
++        dim = embed_cfg.get("dim", 512)
++        provider = embed_cfg.get("provider", "hashing")
++        if provider == "http":
++            try:
++                from .vector.embeddings import HttpEmbeddingProvider
++                http_cfg = embed_cfg.get("http", {})
++                self.embedder = HttpEmbeddingProvider(
++                    base_url=http_cfg.get("base_url", "http://127.0.0.1:8008"),
++                    endpoint=http_cfg.get("endpoint", "/embed_text"),
++                    dim=dim, model=embed_cfg.get("model", "http-v1"),
++                    timeout_seconds=http_cfg.get("timeout_seconds", 30),
++                )
++            except Exception:
++                self.embedder = None
++        else:
++            from .vector.embeddings import HashingEmbeddingProvider
++            self.embedder = HashingEmbeddingProvider(dim=dim, model=embed_cfg.get("model", "hashing-v1"))
++
++        # Qdrant
++        if qdrant_cfg.get("enabled", False):
++            try:
++                from .vector.qdrant_store import QdrantVectorStore
++                self.vector_store = QdrantVectorStore(
++                    host=qdrant_cfg.get("host", "127.0.0.1"),
++                    port=qdrant_cfg.get("http_port", 6333),
++                    collection=qdrant_cfg.get("collection", "project_memory_items"),
++                    vector_dim=dim,
++                    timeout_seconds=qdrant_cfg.get("timeout_seconds", 10),
++                    prefer_grpc=qdrant_cfg.get("prefer_grpc", False),
++                )
++                if self.embedder is not None:
++                    from .vector.indexer import VectorIndexer
++                    self.vector_indexer = VectorIndexer(
++                        self.memory_repo, self.embedder, self.vector_store,
++                    )
++            except Exception:
++                self.vector_store = None
++                self.vector_indexer = None
++        else:
++            self.vector_store = None
++            self.vector_indexer = None
++
+     def _log_ready(self):
+         """记录启动就绪摘要。"""
+         try:
+diff --git a/src/project_memory_mcp/knowledge/governance.py b/src/project_memory_mcp/knowledge/governance.py
+index cb4a07c..438ebf1 100644
+--- a/src/project_memory_mcp/knowledge/governance.py
++++ b/src/project_memory_mcp/knowledge/governance.py
+@@ -73,12 +73,14 @@ class KnowledgeGovernance:
+         validator: ContentValidator,
+         deduplicator: Deduplicator,
+         reviewer: RuleBasedReviewer,
++        indexer=None,
+     ):
+         self.repo = repo
+         self.audit = audit
+         self.validator = validator
+         self.deduplicator = deduplicator
+         self.reviewer = reviewer
++        self.indexer = indexer
+ 
+     # ------------------------------------------------------------------
+     # propose_memory
+@@ -387,6 +389,13 @@ class KnowledgeGovernance:
+ 
+         self.repo.conn.commit()
+ 
++        # Phase 10: 索引向量
++        if self.indexer is not None and updated is not None:
++            try:
++                self.indexer.index_memory(updated)
++            except Exception:
++                pass
++
+         return {
+             "memory_id": memory_id,
+             "status": KnowledgeStatus.APPROVED,
+@@ -446,6 +455,13 @@ class KnowledgeGovernance:
+ 
+         self.repo.conn.commit()
+ 
++        # Phase 10: 删除向量
++        if self.indexer is not None:
++            try:
++                self.indexer.delete_memory(memory_id)
++            except Exception:
++                pass
++
+         return {
+             "memory_id": memory_id,
+             "status": KnowledgeStatus.REJECTED,
+@@ -501,6 +517,13 @@ class KnowledgeGovernance:
+ 
+         self.repo.conn.commit()
+ 
++        # Phase 10: 删除向量
++        if self.indexer is not None:
++            try:
++                self.indexer.delete_memory(memory_id)
++            except Exception:
++                pass
++
+         return {
+             "memory_id": memory_id,
+             "status": KnowledgeStatus.DEPRECATED,
+diff --git a/src/project_memory_mcp/vector/__init__.py b/src/project_memory_mcp/vector/__init__.py
+index abc12a1..61a9e84 100644
+--- a/src/project_memory_mcp/vector/__init__.py
++++ b/src/project_memory_mcp/vector/__init__.py
+@@ -1,6 +1,13 @@
+-"""向量存储层 — 抽象接口 + Mock 实现 + Qdrant 预留。"""
++"""向量索引模块 — HashingEmbeddingProvider + QdrantVectorStore + VectorIndexer。
+ 
+-from .base import VectorStore
+-from .mock_store import MockVectorStore
++Phase 10: Qdrant 集成 + embedding + 混合搜索。
++"""
+ 
+-__all__ = ["VectorStore", "MockVectorStore"]
++from .embeddings import HashingEmbeddingProvider, HttpEmbeddingProvider, BaseEmbeddingProvider
++from .qdrant_store import QdrantVectorStore, QdrantStoreError
++from .indexer import VectorIndexer
++
++__all__ = [
++    "HashingEmbeddingProvider", "HttpEmbeddingProvider", "BaseEmbeddingProvider",
++    "QdrantVectorStore", "QdrantStoreError", "VectorIndexer",
++]

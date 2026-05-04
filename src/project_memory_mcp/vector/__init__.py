@@ -1,6 +1,13 @@
-"""向量存储层 — 抽象接口 + Mock 实现 + Qdrant 预留。"""
+"""向量索引模块 — HashingEmbeddingProvider + QdrantVectorStore + VectorIndexer。
 
-from .base import VectorStore
-from .mock_store import MockVectorStore
+Phase 10: Qdrant 集成 + embedding + 混合搜索。
+"""
 
-__all__ = ["VectorStore", "MockVectorStore"]
+from .embeddings import HashingEmbeddingProvider, HttpEmbeddingProvider, BaseEmbeddingProvider
+from .qdrant_store import QdrantVectorStore, QdrantStoreError
+from .indexer import VectorIndexer
+
+__all__ = [
+    "HashingEmbeddingProvider", "HttpEmbeddingProvider", "BaseEmbeddingProvider",
+    "QdrantVectorStore", "QdrantStoreError", "VectorIndexer",
+]

@@ -46,6 +46,9 @@ class AppContext:
     project_manager: ProjectManager = field(init=False)
     profile_builder: ProjectProfileBuilder = field(init=False)
     search_service: KnowledgeSearchService = field(init=False)
+    embedder: object = field(init=False, default=None)
+    vector_store: object = field(init=False, default=None)
+    vector_indexer: object = field(init=False, default=None)
     validator: ContentValidator = field(init=False)
     deduplicator: Deduplicator = field(init=False)
     reviewer: RuleBasedReviewer = field(init=False)
@@ -73,11 +76,12 @@ class AppContext:
         self.project_manager = ProjectManager(self.project_repo, self.config_loader)
         self.profile_builder = ProjectProfileBuilder(self.memory_repo, self.project_repo)
 
-        # 5. 检索服务（MVP 不接 Qdrant）
+        # 5. 检索服务 + 向量
+        self._init_vector()
         self.search_service = KnowledgeSearchService(
             conn=self.conn,
-            vector_store=None,
-            embedder=None,
+            vector_store=self.vector_store,
+            embedder=self.embedder,
         )
 
         # 6. 知识治理
@@ -94,6 +98,7 @@ class AppContext:
             validator=self.validator,
             deduplicator=self.deduplicator,
             reviewer=self.reviewer,
+            indexer=self.vector_indexer,
         )
 
         # 7. 启动就绪日志
@@ -134,6 +139,69 @@ class AppContext:
         logging.getLogger("project_memory_mcp").info(
             "app_context_start config_dir=%s db_path=%s", self.config_dir, self.db_path,
         )
+
+    def _init_vector(self):
+        """初始化向量组件（Qdrant disabled 时跳过）。"""
+        import yaml
+        server_yml = self.config_dir / "server.yml"
+        qdrant_cfg = {}
+        embed_cfg = {}
+        if server_yml.exists():
+            try:
+                raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
+                qdrant_cfg = raw.get("qdrant", {}) if raw else {}
+                embed_cfg = raw.get("embedding", {}) if raw else {}
+            except Exception:
+                pass
+
+        if not qdrant_cfg.get("enabled", False) and not embed_cfg.get("enabled", False):
+            self.embedder = None
+            self.vector_store = None
+            self.vector_indexer = None
+            return
+
+        # Embedding
+        dim = embed_cfg.get("dim", 512)
+        provider = embed_cfg.get("provider", "hashing")
+        if provider == "http":
+            try:
+                from .vector.embeddings import HttpEmbeddingProvider
+                http_cfg = embed_cfg.get("http", {})
+                self.embedder = HttpEmbeddingProvider(
+                    base_url=http_cfg.get("base_url", "http://127.0.0.1:8008"),
+                    endpoint=http_cfg.get("endpoint", "/embed_text"),
+                    dim=dim, model=embed_cfg.get("model", "http-v1"),
+                    timeout_seconds=http_cfg.get("timeout_seconds", 30),
+                )
+            except Exception:
+                self.embedder = None
+        else:
+            from .vector.embeddings import HashingEmbeddingProvider
+            self.embedder = HashingEmbeddingProvider(dim=dim, model=embed_cfg.get("model", "hashing-v1"))
+
+        # Qdrant
+        if qdrant_cfg.get("enabled", False):
+            try:
+                from .vector.qdrant_store import QdrantVectorStore
+                self.vector_store = QdrantVectorStore(
+                    host=qdrant_cfg.get("host", "127.0.0.1"),
+                    port=qdrant_cfg.get("http_port", 6333),
+                    collection=qdrant_cfg.get("collection", "project_memory_items"),
+                    vector_dim=dim,
+                    timeout_seconds=qdrant_cfg.get("timeout_seconds", 10),
+                    prefer_grpc=qdrant_cfg.get("prefer_grpc", False),
+                )
+                if self.embedder is not None:
+                    from .vector.indexer import VectorIndexer
+                    self.vector_indexer = VectorIndexer(
+                        self.memory_repo, self.embedder, self.vector_store,
+                    )
+            except Exception:
+                self.vector_store = None
+                self.vector_indexer = None
+        else:
+            self.vector_store = None
+            self.vector_indexer = None
 
     def _log_ready(self):
         """记录启动就绪摘要。"""

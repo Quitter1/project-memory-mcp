@@ -23,24 +23,36 @@ database:
   path: "data/memory.db"
   backup_enabled: false              # MVP 阶段暂不开启自动备份
 
-# Qdrant 连接（MVP 阶段不启用，仅预留配置）
+# Qdrant 连接
 qdrant:
-  enabled: false
+  enabled: true
   host: "127.0.0.1"
   http_port: 6333
   grpc_port: 6334
+  prefer_grpc: false
+  collection: "project_memory_items"
   executable_path: "qdrant/qdrant.exe"
   storage_path: "qdrant/storage"
-  collection: "project_memory_default"
-  api_key: null
   timeout_seconds: 10
 
 # Embedding 配置
 embedding:
-  provider: "mock"                    # mock | http | local（MVP 用 mock）
-  model: "mock-embedding-v1"
-  dimension: 768
-  batch_size: 32
+  enabled: false
+  provider: "hashing"                  # hashing | http
+  dim: 512
+  model: "hashing-v1"
+  http:
+    base_url: "http://127.0.0.1:8008"
+    endpoint: "/embed_text"
+    timeout_seconds: 30
+
+# 搜索配置
+search:
+  mode: "hybrid"                       # keyword | vector | hybrid
+  keyword_weight: 0.55
+  vector_weight: 0.45
+  vector_top_k: 30
+  fallback_to_keyword: true
 
 # 审核器
 reviewer:

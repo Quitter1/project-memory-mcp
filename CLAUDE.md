@@ -147,7 +147,16 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 8.2 — 真实使用回路收口（cleanup三组分类/--include-terminal/rejected显示/diagnose一致性）。
+当前阶段：阶段 10 — Qdrant + embedding + 向量索引 + 混合搜索基础框架。
+
+## Qdrant 规则
+
+- Qdrant 是派生索引，不是事实源
+- 不得从 Qdrant payload 拼最终答案，必须回 SQLite 取完整 MemoryItem
+- Qdrant 不可用时自动 fallback keyword
+- Qdrant payload 不存 content/source_evidence 原文
+- rejected/deprecated 不参与搜索，也不保留向量
+- 新增向量日志必须脱敏
 
 ## 真实使用规则
 
