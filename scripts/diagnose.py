@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
     parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
     parser.add_argument("--vector-summary", action="store_true", help="显示向量索引状态")
+    parser.add_argument("--llm-summary", action="store_true", help="显示 LLM Reviewer 状态")
     args = parser.parse_args()
 
     config_dir, db_path = _paths.get_project_paths()
@@ -165,6 +166,26 @@ def main():
             conn.close()
         else:
             print("  数据库不存在")
+
+    # 8. llm-summary
+    if args.llm_summary:
+        print(f"\n[8] LLM Reviewer")
+        try:
+            import os
+            import yaml
+            from project_memory_mcp.llm.config import LLMReviewerConfig
+            server_yml = config_dir / "server.yml"
+            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8")) if server_yml.exists() else {}
+            cfg = LLMReviewerConfig.from_server_config(raw)
+            print(f"  enabled = {cfg.enabled}")
+            print(f"  provider = {cfg.provider}")
+            print(f"  base_url_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_BASE_URL') else 'no'}")
+            print(f"  api_key_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_API_KEY') else 'no'}")
+            print(f"  model_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_MODEL') else 'no'}")
+            print(f"  timeout_seconds = {cfg.timeout_seconds}")
+            print(f"  fail_mode = {cfg.fail_mode}")
+        except Exception as exc:
+            print(f"  LLM 状态获取失败: {exc}")
 
     # 7. vector-summary
     if args.vector_summary:

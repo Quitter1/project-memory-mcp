@@ -59,6 +59,20 @@ reviewer:
   provider: "rule-based"             # rule-based | llm（MVP 用 rule-based）
   llm_model: null                    # 预留 LLM reviewer 配置
 
+# LLM Reviewer（二次评审）
+llm_reviewer:
+  enabled: false
+  provider: "deepseek"
+  base_url_env: "PROJECT_MEMORY_LLM_BASE_URL"
+  api_key_env: "PROJECT_MEMORY_LLM_API_KEY"
+  model_env: "PROJECT_MEMORY_LLM_MODEL"
+  timeout_seconds: 30
+  max_retries: 1
+  temperature: 0.0
+  max_input_chars: 6000
+  max_output_tokens: 800
+  fail_mode: "pending_review"
+
 # 备份
 backup:
   jsonl_enabled: false               # MVP 阶段暂不开启

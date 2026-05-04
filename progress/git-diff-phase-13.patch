@@ -1,0 +1,186 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 4fb08e6..5298003 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 12 — MCP 接入 BGE-M3 HTTP embedding（provider=http/dim=1024/新collection/质量跃升）。
++当前阶段：阶段 13.3 — LLM Reviewer hotfix（_parse_llm_response import提前/governance logger补充/exit code）。
+ 
+ ## 后续路线
+ 
+diff --git a/config/server.yml b/config/server.yml
+index 7c6329f..1d9baf6 100644
+--- a/config/server.yml
++++ b/config/server.yml
+@@ -59,6 +59,20 @@ reviewer:
+   provider: "rule-based"             # rule-based | llm（MVP 用 rule-based）
+   llm_model: null                    # 预留 LLM reviewer 配置
+ 
++# LLM Reviewer（二次评审）
++llm_reviewer:
++  enabled: false
++  provider: "deepseek"
++  base_url_env: "PROJECT_MEMORY_LLM_BASE_URL"
++  api_key_env: "PROJECT_MEMORY_LLM_API_KEY"
++  model_env: "PROJECT_MEMORY_LLM_MODEL"
++  timeout_seconds: 30
++  max_retries: 1
++  temperature: 0.0
++  max_input_chars: 6000
++  max_output_tokens: 800
++  fail_mode: "pending_review"
++
+ # 备份
+ backup:
+   jsonl_enabled: false               # MVP 阶段暂不开启
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index d1650e9..21b45a0 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -85,6 +85,7 @@ def main():
+     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
+     parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
+     parser.add_argument("--vector-summary", action="store_true", help="显示向量索引状态")
++    parser.add_argument("--llm-summary", action="store_true", help="显示 LLM Reviewer 状态")
+     args = parser.parse_args()
+ 
+     config_dir, db_path = _paths.get_project_paths()
+@@ -166,6 +167,26 @@ def main():
+         else:
+             print("  数据库不存在")
+ 
++    # 8. llm-summary
++    if args.llm_summary:
++        print(f"\n[8] LLM Reviewer")
++        try:
++            import os
++            import yaml
++            from project_memory_mcp.llm.config import LLMReviewerConfig
++            server_yml = config_dir / "server.yml"
++            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8")) if server_yml.exists() else {}
++            cfg = LLMReviewerConfig.from_server_config(raw)
++            print(f"  enabled = {cfg.enabled}")
++            print(f"  provider = {cfg.provider}")
++            print(f"  base_url_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_BASE_URL') else 'no'}")
++            print(f"  api_key_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_API_KEY') else 'no'}")
++            print(f"  model_env_present = {'yes' if os.environ.get('PROJECT_MEMORY_LLM_MODEL') else 'no'}")
++            print(f"  timeout_seconds = {cfg.timeout_seconds}")
++            print(f"  fail_mode = {cfg.fail_mode}")
++        except Exception as exc:
++            print(f"  LLM 状态获取失败: {exc}")
++
+     # 7. vector-summary
+     if args.vector_summary:
+         print(f"\n[7] 向量索引摘要")
+diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
+index 76771fc..cb4748e 100644
+--- a/src/project_memory_mcp/app_context.py
++++ b/src/project_memory_mcp/app_context.py
+@@ -102,6 +102,22 @@ class AppContext:
+             embedder=None,
+         )
+         self.reviewer = RuleBasedReviewer()
++        from .llm.config import LLMReviewerConfig
++        import yaml as _yaml
++        llm_cfg = LLMReviewerConfig()
++        srv = self.config_dir / "server.yml"
++        if srv.exists():
++            try:
++                raw = _yaml.safe_load(srv.read_text(encoding="utf-8"))
++                llm_cfg = LLMReviewerConfig.from_server_config(raw)
++            except Exception:
++                pass
++
++        llm_reviewer = None
++        if llm_cfg.is_configured():
++            from .llm.reviewer import LLMReviewer
++            llm_reviewer = LLMReviewer(llm_cfg)
++
+         self.governance = KnowledgeGovernance(
+             repo=self.memory_repo,
+             audit=self.audit_repo,
+@@ -109,6 +125,7 @@ class AppContext:
+             deduplicator=self.deduplicator,
+             reviewer=self.reviewer,
+             indexer=self.vector_indexer,
++            llm_reviewer=llm_reviewer,
+         )
+ 
+         # 7. 启动就绪日志
+diff --git a/src/project_memory_mcp/knowledge/governance.py b/src/project_memory_mcp/knowledge/governance.py
+index 438ebf1..3366180 100644
+--- a/src/project_memory_mcp/knowledge/governance.py
++++ b/src/project_memory_mcp/knowledge/governance.py
+@@ -6,9 +6,12 @@ Phase 4.1 变更：
+ """
+ 
+ import json
++import logging
+ from datetime import datetime, timezone
+ from typing import Optional
+ 
++logger = logging.getLogger("project_memory_mcp")
++
+ from ..config.schema import ProjectConfig
+ from ..db.audit_repo import AuditRepository
+ from ..db.memory_repo import MemoryRepository
+@@ -74,6 +77,7 @@ class KnowledgeGovernance:
+         deduplicator: Deduplicator,
+         reviewer: RuleBasedReviewer,
+         indexer=None,
++        llm_reviewer=None,
+     ):
+         self.repo = repo
+         self.audit = audit
+@@ -81,6 +85,7 @@ class KnowledgeGovernance:
+         self.deduplicator = deduplicator
+         self.reviewer = reviewer
+         self.indexer = indexer
++        self.llm_reviewer = llm_reviewer
+ 
+     # ------------------------------------------------------------------
+     # propose_memory
+@@ -265,9 +270,39 @@ class KnowledgeGovernance:
+             has_conflict=len(semantic_similar) > 0,
+         )
+ 
+-        # === Step 4: 确定目标状态 ===
++        # === Step 4: LLM 二次评审 ===
++        llm_result = None
++        llm_applied = False
++        if self.llm_reviewer is not None and self.llm_reviewer.enabled:
++            try:
++                llm_result = self.llm_reviewer.review({
++                    "project_id": project.id,
++                    "title": title, "content": content,
++                    "type": knowledge_type, "module": module,
++                    "tags": tags, "source_type": source_type,
++                    "scope": scope, "confidence": confidence,
++                    "risk_level": final_risk_level,
++                })
++                if llm_result.decision == "reject":
++                    review_decision = ReviewDecision(
++                        auto_approved=False,
++                        reason="LLM Reviewer 建议拒绝",
++                    )
++                    llm_applied = True
++                elif llm_result.decision == "pending_review" and review_decision.auto_approved:
++                    review_decision = ReviewDecision(
++                        auto_approved=False,
++                        reason="LLM Reviewer 降级为 pending_review",
++                    )
++                    llm_applied = True
++            except Exception as _llm_exc:
++                logger.error("llm_review_failed exc_type=%s", type(_llm_exc).__name__)
++
++        # === Step 5: 确定目标状态 ===
+         if review_decision.auto_approved:
+             target_status = KnowledgeStatus.APPROVED
++        elif llm_applied and llm_result and llm_result.decision == "reject":
++            target_status = KnowledgeStatus.REJECTED
+         else:
+             target_status = KnowledgeStatus.PENDING_REVIEW
+ 

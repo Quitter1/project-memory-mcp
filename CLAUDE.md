@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 12 — MCP 接入 BGE-M3 HTTP embedding（provider=http/dim=1024/新collection/质量跃升）。
+当前阶段：阶段 13.3 — LLM Reviewer hotfix（_parse_llm_response import提前/governance logger补充/exit code）。
 
 ## 后续路线
 

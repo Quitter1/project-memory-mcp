@@ -6,8 +6,11 @@ Phase 4.1 变更：
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger("project_memory_mcp")
 
 from ..config.schema import ProjectConfig
 from ..db.audit_repo import AuditRepository
@@ -74,6 +77,7 @@ class KnowledgeGovernance:
         deduplicator: Deduplicator,
         reviewer: RuleBasedReviewer,
         indexer=None,
+        llm_reviewer=None,
     ):
         self.repo = repo
         self.audit = audit
@@ -81,6 +85,7 @@ class KnowledgeGovernance:
         self.deduplicator = deduplicator
         self.reviewer = reviewer
         self.indexer = indexer
+        self.llm_reviewer = llm_reviewer
 
     # ------------------------------------------------------------------
     # propose_memory
@@ -265,9 +270,39 @@ class KnowledgeGovernance:
             has_conflict=len(semantic_similar) > 0,
         )
 
-        # === Step 4: 确定目标状态 ===
+        # === Step 4: LLM 二次评审 ===
+        llm_result = None
+        llm_applied = False
+        if self.llm_reviewer is not None and self.llm_reviewer.enabled:
+            try:
+                llm_result = self.llm_reviewer.review({
+                    "project_id": project.id,
+                    "title": title, "content": content,
+                    "type": knowledge_type, "module": module,
+                    "tags": tags, "source_type": source_type,
+                    "scope": scope, "confidence": confidence,
+                    "risk_level": final_risk_level,
+                })
+                if llm_result.decision == "reject":
+                    review_decision = ReviewDecision(
+                        auto_approved=False,
+                        reason="LLM Reviewer 建议拒绝",
+                    )
+                    llm_applied = True
+                elif llm_result.decision == "pending_review" and review_decision.auto_approved:
+                    review_decision = ReviewDecision(
+                        auto_approved=False,
+                        reason="LLM Reviewer 降级为 pending_review",
+                    )
+                    llm_applied = True
+            except Exception as _llm_exc:
+                logger.error("llm_review_failed exc_type=%s", type(_llm_exc).__name__)
+
+        # === Step 5: 确定目标状态 ===
         if review_decision.auto_approved:
             target_status = KnowledgeStatus.APPROVED
+        elif llm_applied and llm_result and llm_result.decision == "reject":
+            target_status = KnowledgeStatus.REJECTED
         else:
             target_status = KnowledgeStatus.PENDING_REVIEW
 

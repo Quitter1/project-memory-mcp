@@ -102,6 +102,22 @@ class AppContext:
             embedder=None,
         )
         self.reviewer = RuleBasedReviewer()
+        from .llm.config import LLMReviewerConfig
+        import yaml as _yaml
+        llm_cfg = LLMReviewerConfig()
+        srv = self.config_dir / "server.yml"
+        if srv.exists():
+            try:
+                raw = _yaml.safe_load(srv.read_text(encoding="utf-8"))
+                llm_cfg = LLMReviewerConfig.from_server_config(raw)
+            except Exception:
+                pass
+
+        llm_reviewer = None
+        if llm_cfg.is_configured():
+            from .llm.reviewer import LLMReviewer
+            llm_reviewer = LLMReviewer(llm_cfg)
+
         self.governance = KnowledgeGovernance(
             repo=self.memory_repo,
             audit=self.audit_repo,
@@ -109,6 +125,7 @@ class AppContext:
             deduplicator=self.deduplicator,
             reviewer=self.reviewer,
             indexer=self.vector_indexer,
+            llm_reviewer=llm_reviewer,
         )
 
         # 7. 启动就绪日志
