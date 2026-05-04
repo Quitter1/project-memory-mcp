@@ -1,0 +1,45 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 129f196..4fb08e6 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,13 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 11.1 — 检索评测收口（SAFE_PAYLOAD白名单/provider/model分离/diagnose分布/scroll兼容）。
++当前阶段：阶段 12 — MCP 接入 BGE-M3 HTTP embedding（provider=http/dim=1024/新collection/质量跃升）。
++
++## 后续路线
++
++- Phase 7：真实 MCP stdio / Claude Code 接入验证 ✅
++- Phase 8：Qdrant + embedding ✅
++- Phase 9：DSV4P / LLM Reviewer（待开始）
+ 
+ ## Qdrant 规则
+ 
+diff --git a/config/server.yml b/config/server.yml
+index 9ed5455..7c6329f 100644
+--- a/config/server.yml
++++ b/config/server.yml
+@@ -30,7 +30,7 @@ qdrant:
+   http_port: 6333
+   grpc_port: 6334
+   prefer_grpc: false
+-  collection: "project_memory_items"
++  collection: "project_memory_items_bge_m3"
+   executable_path: "qdrant/qdrant.exe"
+   storage_path: "qdrant/storage"
+   timeout_seconds: 10
+@@ -38,9 +38,9 @@ qdrant:
+ # Embedding 配置
+ embedding:
+   enabled: true
+-  provider: "hashing"                  # hashing | http
+-  dim: 512
+-  model: "hashing-v1"
++  provider: "http"                     # hashing | http
++  dim: 1024
++  model: "BAAI/bge-m3"
+   http:
+     base_url: "http://127.0.0.1:8008"
+     endpoint: "/embed_text"

@@ -30,7 +30,7 @@ qdrant:
   http_port: 6333
   grpc_port: 6334
   prefer_grpc: false
-  collection: "project_memory_items"
+  collection: "project_memory_items_bge_m3"
   executable_path: "qdrant/qdrant.exe"
   storage_path: "qdrant/storage"
   timeout_seconds: 10
@@ -38,9 +38,9 @@ qdrant:
 # Embedding 配置
 embedding:
   enabled: true
-  provider: "hashing"                  # hashing | http
-  dim: 512
-  model: "hashing-v1"
+  provider: "http"                     # hashing | http
+  dim: 1024
+  model: "BAAI/bge-m3"
   http:
     base_url: "http://127.0.0.1:8008"
     endpoint: "/embed_text"

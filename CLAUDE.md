@@ -147,7 +147,13 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 11.1 — 检索评测收口（SAFE_PAYLOAD白名单/provider/model分离/diagnose分布/scroll兼容）。
+当前阶段：阶段 12 — MCP 接入 BGE-M3 HTTP embedding（provider=http/dim=1024/新collection/质量跃升）。
+
+## 后续路线
+
+- Phase 7：真实 MCP stdio / Claude Code 接入验证 ✅
+- Phase 8：Qdrant + embedding ✅
+- Phase 9：DSV4P / LLM Reviewer（待开始）
 
 ## Qdrant 规则
 
