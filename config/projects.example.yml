@@ -1,0 +1,272 @@
+# ================================================================
+# 多项目配置 — project-memory-mcp（权威配置源）
+# ================================================================
+# 此文件是项目配置的权威来源。启动时通过 sync_projects 同步到 SQLite。
+# 修改此文件后需执行 sync_projects 或重启 MCP server（自动检测不一致）。
+# ================================================================
+
+projects:
+  # ------------------------------------------------------------------
+  # 示例项目 1：标牌 ERP（Java 后端项目）
+  # ------------------------------------------------------------------
+  biaopai-erp:
+    name: "标牌 ERP"
+    slug: "biaopai-erp"
+    description: "标牌企业 ERP 系统，基于 Java Spring MVC + Freemarker + MySQL"
+    status: active
+
+    recognition:
+      root_paths:
+        - "D:/workspace/biaopai-erp"
+        - "/home/dev/biaopai-erp"
+      path_patterns:
+        - "**/biaopai-erp/**"
+        - "**/erp-web/**"
+        - "**/erp-service/**"
+      aliases:
+        - "标牌erp"
+        - "erp"
+        - "biaopai"
+      tech_stack_keywords:
+        - "java"
+        - "spring"
+        - "spring mvc"
+        - "freemarker"
+        - "mysql"
+        - "mybatis"
+        - "jquery"
+      module_keywords:
+        - "订单管理"
+        - "物料管理"
+        - "采购管理"
+        - "生产管理"
+        - "财务结算"
+        - "库存管理"
+
+    knowledge_policy:
+      default_confidence: 0.5
+      auto_approve_threshold: -1       # -1 = 禁止自动批准，全部人工审核
+      max_candidate_per_task: 15
+      retention_days: 365
+      forbidden_content_patterns:
+        - "jdbc:mysql://.*"
+        - "application-prod\\.properties"
+        - "\\$\\{jdbc\\..*password\\}"
+
+    review_policy:
+      allow_ai_auto_approve: false
+      forbidden_auto_types:
+        - business_rule
+        - security_config
+      risk_threshold_for_review: medium
+      require_review_if_conflict: true
+
+    metadata:
+      team: "ERP 团队"
+      language: "java"
+      framework: "spring-mvc"
+
+  # ------------------------------------------------------------------
+  # 示例项目 2：CDR 转换工具（Python 桌面工具）
+  # ------------------------------------------------------------------
+  cdr-converter:
+    name: "CDR 转图片工具"
+    slug: "cdr-converter"
+    description: "CorelDRAW CDR 文件批量转换为 PNG/SVG 的桌面工具"
+    status: active
+
+    recognition:
+      root_paths:
+        - "D:/workspace/cdr-converter"
+        - "/home/dev/cdr-converter"
+      path_patterns:
+        - "**/cdr-converter/**"
+        - "**/cdr_tools/**"
+      aliases:
+        - "cdr转换"
+        - "coreldraw"
+        - "cdr工具"
+      tech_stack_keywords:
+        - "python"
+        - "tkinter"
+        - "coreldraw"
+        - "com"
+        - "pillow"
+        - "win32com"
+      module_keywords:
+        - "cdr解析"
+        - "图片导出"
+        - "批量转换"
+
+    knowledge_policy:
+      default_confidence: 0.5
+      auto_approve_threshold: 0.9
+      max_candidate_per_task: 20
+      retention_days: 180
+
+    review_policy:
+      allow_ai_auto_approve: true     # Python 工具项目允许 AI 自动批准
+      forbidden_auto_types:
+        - security_config
+      risk_threshold_for_review: high
+      require_review_if_conflict: true
+
+    metadata:
+      team: "工具开发组"
+      language: "python"
+      framework: "tkinter"
+
+  # ------------------------------------------------------------------
+  # 示例项目 3：RPA 客户端（Electron 前端项目）
+  # ------------------------------------------------------------------
+  rpa-electron:
+    name: "Electron RPA 自动化"
+    slug: "rpa-electron"
+    status: active
+    recognition:
+      root_paths:
+        - "F:/project/auto_script/rpa-todomvc-demo"
+      aliases:
+        - "rpa-electron"
+        - "rpa-todomvc-demo"
+        - "todomvc"
+        - "电商自动化"
+        - "Electron RPA"
+        - "Playwright"
+      tech_stack_keywords:
+        - "Electron"
+        - "Vue3"
+        - "TypeScript"
+        - "Playwright"
+        - "webview"
+      module_keywords:
+        - "RPA"
+        - "自动化"
+        - "调试面板"
+        - "webview"
+
+    knowledge_policy:
+      default_confidence: 0.5
+      auto_approve_threshold: 0.85
+      max_candidate_per_task: 25
+      retention_days: 365
+
+    review_policy:
+      allow_ai_auto_approve: true
+      forbidden_auto_types: []
+      risk_threshold_for_review: high
+      require_review_if_conflict: false
+
+    metadata:
+      team: "RPA 团队"
+      language: "typescript"
+      framework: "electron"
+
+  # ------------------------------------------------------------------
+  # 示例项目 4：图片向量检索（Java AI 项目）
+  # ------------------------------------------------------------------
+  img-vector-search:
+    name: "图片向量检索系统"
+    slug: "img-vector-search"
+    description: "基于向量相似度的图片检索系统，Java Spring Boot + Qdrant + CLIP Embedding"
+    status: active
+
+    recognition:
+      root_paths:
+        - "D:/workspace/img-vector-search"
+        - "/home/dev/img-vector-search"
+      path_patterns:
+        - "**/img-vector-search/**"
+        - "**/img-search/**"
+      aliases:
+        - "图片检索"
+        - "vector search"
+        - "以图搜图"
+      tech_stack_keywords:
+        - "java"
+        - "spring boot"
+        - "qdrant"
+        - "clip"
+        - "embedding"
+        - "onnx"
+      module_keywords:
+        - "图片入库"
+        - "特征提取"
+        - "相似度计算"
+        - "搜索结果排序"
+
+    knowledge_policy:
+      default_confidence: 0.5
+      auto_approve_threshold: -1       # AI 相关项目严格审核
+      max_candidate_per_task: 15
+      retention_days: 365
+
+    review_policy:
+      allow_ai_auto_approve: false
+      forbidden_auto_types:
+        - architecture
+        - business_rule
+        - security_config
+      risk_threshold_for_review: medium
+      require_review_if_conflict: true
+
+    metadata:
+      team: "AI 团队"
+      language: "java"
+      framework: "spring-boot"
+
+  # ------------------------------------------------------------------
+  # 示例：已归档项目
+  # ------------------------------------------------------------------
+  old-tool:
+    name: "旧工具项目（已归档）"
+    slug: "old-tool"
+    description: "已废弃的旧工具，知识保留用于历史参考"
+    status: archived
+    superseded_by: "cdr-converter"
+
+    recognition:
+      root_paths: []
+      aliases:
+        - "old-tool"
+      tech_stack_keywords: []
+      module_keywords: []
+
+    knowledge_policy:
+      auto_approve_threshold: -1
+      retention_days: 90
+
+    review_policy:
+      allow_ai_auto_approve: false
+      risk_threshold_for_review: medium
+      require_review_if_conflict: false
+
+    metadata: {}
+
+# ================================================================
+# 全局默认值
+# ================================================================
+defaults:
+  knowledge_policy:
+    default_confidence: 0.5
+    auto_approve_threshold: -1         # 默认禁止自动批准
+    max_candidate_per_task: 20
+    retention_days: 365
+
+  review_policy:
+    allow_ai_auto_approve: false
+    forbidden_auto_types: []
+    risk_threshold_for_review: medium
+    require_review_if_conflict: true
+
+  vector_store:
+    qdrant_collection: "memory_default"
+
+# ================================================================
+# 共享/全局知识治理规则
+# ================================================================
+sharing_rules:
+  global_require_review: true           # global 知识必须人工审核
+  shared_require_review: true           # shared 知识必须人工审核
+  max_shared_projects: 10              # shared 知识最多允许 10 个项目
+  auto_deny_projects_on_conflict: true # 有冲突时自动拒绝跨项目共享

@@ -8,9 +8,9 @@ _DOCS = Path(__file__).parent.parent / "docs"
 _PROMPTS = _DOCS / "prompts"
 
 _REQUIRED_DOCS = [
-    "claude-code-memory-workflow.md",
-    "memory-review-guide.md",
-    "claude-code-mcp-setup.md",
+    "ClaudeCode记忆工作流.md",
+    "知识审核指南.md",
+    "ClaudeCode接入配置.md",
 ]
 
 _REQUIRED_PROMPTS = [
@@ -31,12 +31,12 @@ def test_prompts_exist():
 
 
 def test_workflow_forbids_auto_propose():
-    content = (_DOCS / "claude-code-memory-workflow.md").read_text(encoding="utf-8")
+    content = (_DOCS / "ClaudeCode记忆工作流.md").read_text(encoding="utf-8")
     assert "不允许自动 propose_memory" in content or "默认不允许自动" in content
 
 
 def test_workflow_mentions_cc_test():
-    content = (_DOCS / "claude-code-memory-workflow.md").read_text(encoding="utf-8")
+    content = (_DOCS / "ClaudeCode记忆工作流.md").read_text(encoding="utf-8")
     assert "[CC_TEST]" in content
 
 
@@ -46,6 +46,6 @@ def test_prompt_list_only():
 
 
 def test_review_guide_has_standards():
-    content = (_DOCS / "memory-review-guide.md").read_text(encoding="utf-8")
+    content = (_DOCS / "知识审核指南.md").read_text(encoding="utf-8")
     assert "可 approve" in content or "可以 approve" in content
     assert "应 reject" in content or "应该 reject" in content

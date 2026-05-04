@@ -1,0 +1,348 @@
+diff --git a/.gitignore b/.gitignore
+index 504fcb6..25d1d80 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,14 +14,17 @@ env/
+ 
+ # 运行时数据
+ data/
++!data/.gitkeep
+ *.db
+ *.db-journal
+ *.db-wal
++*.db-shm
+ 
+ # 本地 Qdrant（本机运行依赖，不提交）
+ qdrant/
+ 
+ # 日志
++logs/
+ *.log
+ 
+ # IDE
+@@ -32,12 +35,19 @@ qdrant/
+ 
+ # 环境变量
+ .env
+-.env.local
++.env.*
+ 
+ # 审阅包
+ reviews/
+ review-pack-*.zip
+ 
++# 备份
++backups/
++
++# 缓存
++.mypy_cache/
++.ruff_cache/
++
+ # 系统文件
+ .DS_Store
+ Thumbs.db
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 5298003..21e3144 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 13.3 — LLM Reviewer hotfix（_parse_llm_response import提前/governance logger补充/exit code）。
++当前阶段：阶段 14 — 源码部署整理（.gitignore/example配置/bootstrap空库/source-deployment文档）。
+ 
+ ## 后续路线
+ 
+diff --git a/README.md b/README.md
+index 11389ce..6b2edf1 100644
+--- a/README.md
++++ b/README.md
+@@ -82,7 +82,7 @@ python -m project_memory_mcp
+ 
+ ## Phase 7：真实 MCP 接入验证
+ 
+-Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
++Claude Code 配置文档：`docs/ClaudeCode接入配置.md`
+ 
+ ```bash
+ # 验证 MCP server 可启动
+@@ -145,7 +145,7 @@ python -m pytest tests/ -v
+ 4. 人工审核：`python scripts/review_memories.py list --status pending_review`
+ 5. 测试清理：`python scripts/cleanup_test_memories.py --dry-run`
+ 
+-详细规范见 `docs/claude-code-memory-workflow.md`
++详细规范见 `docs/ClaudeCode记忆工作流.md`
+ 
+ ## 备注
+ 
+diff --git a/docs/claude-code-mcp-setup.md b/docs/claude-code-mcp-setup.md
+deleted file mode 100644
+index 40cb8b0..0000000
+--- a/docs/claude-code-mcp-setup.md
++++ /dev/null
+@@ -1,87 +0,0 @@
+-# Claude Code MCP 接入配置
+-
+-## 接入前检查
+-
+-```bash
+-# 推荐：临时库 + demo 数据，不污染当前 data/memory.db
+-python scripts/test_mcp_stdio_client.py --seed-demo
+-
+-# 如果要用当前真实数据库验证（会写入测试知识，不推荐频繁使用）
+-python scripts/test_mcp_stdio_client.py --use-current-db
+-
+-# 基础检查
+-python scripts/check_mcp_server.py
+-python scripts/dev_check.py
+-python scripts/diagnose.py
+-```
+-
+-## 推荐配置
+-
+-在 Claude Code 配置中添加：
+-
+-```json
+-{
+-  "mcpServers": {
+-    "project-memory-mcp": {
+-      "command": "python",
+-      "args": ["-m", "project_memory_mcp"],
+-      "env": {
+-        "PROJECT_MEMORY_CONFIG_DIR": "F:/project/project-memory-mcp/config",
+-        "PROJECT_MEMORY_DB_PATH": "F:/project/project-memory-mcp/data/memory.db",
+-        "PROJECT_MEMORY_LOG_DIR": "F:/project/project-memory-mcp/logs",
+-        "PROJECT_MEMORY_LOG_LEVEL": "INFO"
+-      }
+-    }
+-  }
+-}
+-```
+-
+-## Windows 路径注意事项
+-
+-1. 路径建议用正斜杠：`F:/project/...`
+-2. 不要把日志写 stdout（MCP stdio 占用）
+-3. `python` 要指向当前虚拟环境或系统 Python
+-4. 如果 Claude Code 找不到模块，使用虚拟环境 Python 绝对路径：
+-
+-```json
+-{
+-  "command": "F:/project/project-memory-mcp/.venv/Scripts/python.exe",
+-  "args": ["-m", "project_memory_mcp"]
+-}
+-```
+-
+-## 故障排查
+-
+-| 问题 | 解决 |
+-|------|------|
+-| `ModuleNotFoundError: mcp` | `pip install mcp` |
+-| 找不到 `projects.yml` | 检查 `PROJECT_MEMORY_CONFIG_DIR` |
+-| 没有 `memory.db` | `python scripts/init_db.py && python scripts/sync_projects.py` |
+-| MCP 启动后"卡住" | 正常 — stdio server 在等待客户端请求 |
+-| Claude Code 看不到 tools | 检查 command/args/env，查看 `logs/errors.log` |
+-| MCP 搜索慢/卡住 | 更新代码或配置后必须重启 Claude Code 清理旧进程 |
+-
+-## 更新代码/配置后必须重启
+-
+-修改 `config/server.yml` 或更新 Python 代码后，Claude Code 可能仍连接旧的 MCP server 进程。
+-
+-清理方法（Windows PowerShell）：
+-
+-```powershell
+-# 查看残留进程
+-powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1
+-
+-# 终止残留进程
+-powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1 -Kill
+-```
+-
+-或手动：
+-
+-```powershell
+-Get-CimInstance Win32_Process |
+-  Where-Object { $_.CommandLine -match "project_memory_mcp" } |
+-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+-```
+-
+-清理后 Claude Code 下次调用 MCP 时会重新启动 server。
+-| `project_not_found` | 确保 `config/projects.yml` 包含对应项目 |
+diff --git a/docs/claude-code-memory-workflow.md b/docs/claude-code-memory-workflow.md
+deleted file mode 100644
+index 0e255a3..0000000
+--- a/docs/claude-code-memory-workflow.md
++++ /dev/null
+@@ -1,58 +0,0 @@
+-# Claude Code 使用 project-memory-mcp 规范
+-
+-## 核心原则
+-
+-**AI 默认不允许自动 propose_memory。只有用户明确要求"沉淀/保存/记录为知识"时才允许。**
+-
+-## 任务开始时
+-
+-Claude Code 可以自动调用：
+-
+-- `resolve_project` — 识别当前项目
+-- `search_project_context` — 检索相关知识
+-- `get_project_profile` — 了解项目统计
+-
+-推荐提示词：
+-
+-```text
+-开始任务前，请通过 project-memory-mcp 自动识别当前项目，
+-并搜索与本任务相关的项目知识。只读取，不写入。
+-```
+-
+-## 任务执行中
+-
+-- 根据 `search_project_context` 返回的知识辅助判断
+-- 引用已有项目约定
+-- **不允许自动 propose_memory**
+-
+-## 任务结束后
+-
+-只有用户明确说以下关键词时，才允许 `propose_memory`：
+-
+-- "沉淀为项目知识"
+-- "记录到项目记忆"
+-- "保存这条经验"
+-- "记住这个"
+-
+-### propose_memory 规范
+-
+-1. 一次最多提交 1-3 条
+-2. title 必须具体，能描述知识内容
+-3. content 必须是长期有效的项目知识
+-4. source_type 默认 `ai_inferred`
+-5. confidence 默认不超过 0.7
+-6. **不允许包含**：密钥、token、密码、私钥、完整大段源码
+-7. 测试知识 title 必须以 `[CC_TEST]` 开头
+-
+-## 推荐完整工作流
+-
+-```text
+-search → 执行任务 → 用户确认 → propose → pending_review → 人工 approve/reject
+-```
+-
+-## 禁止行为
+-
+-- 用户未要求时自动 propose_memory
+-- 批量写入大量知识
+-- 包含敏感信息的知识
+-- 绕过 governance 直接修改数据库
+diff --git a/docs/memory-review-guide.md b/docs/memory-review-guide.md
+deleted file mode 100644
+index 8e24b12..0000000
+--- a/docs/memory-review-guide.md
++++ /dev/null
+@@ -1,67 +0,0 @@
+-# 知识审核指南
+-
+-## 查看待审核知识
+-
+-```bash
+-python scripts/review_memories.py list --status pending_review
+-```
+-
+-## 审核标准
+-
+-### 可 approve
+-
+-- 明确、长期有效、项目特有
+-- 能帮助后续开发
+-- 不含敏感信息
+-- 不只是一次性任务过程
+-- 来源可信（user_confirmed / code_verified / sql_verified / manual_input）
+-
+-### 应 reject
+-
+-- 测试知识（`[CC_TEST]` 前缀）
+-- 描述模糊、无实质内容
+-- 很快过期的内容
+-- 和已有知识重复
+-- AI 猜测但没有代码/文档依据
+-- 包含大段源码（>50 行）或大段 SQL（>500 字符）
+-
+-### 应 deprecate
+-
+-- 以前正确，现在过期
+-- 项目结构已迁移
+-- 字段或接口已变更
+-- 被新知识取代
+-
+-## 状态含义
+-
+-| status | 含义 |
+-|--------|------|
+-| candidate | AI 提交的候选知识 |
+-| pending_review | 待人工审核 |
+-| approved | 审核通过，可被检索 |
+-| rejected | 审核拒绝（终态） |
+-| deprecated | 已废弃（终态） |
+-| superseded | 已被替代 |
+-| conflict | 存在冲突 |
+-
+-## source_type 可信度
+-
+-| source_type | 可信度 | 说明 |
+-|-------------|--------|------|
+-| user_confirmed | 高 | 用户明确确认 |
+-| code_verified | 高 | 代码审查验证 |
+-| sql_verified | 高 | SQL 执行验证 |
+-| manual_input | 高 | 人工录入 |
+-| ai_inferred | 中 | AI 推断 |
+-| imported_doc | 中 | 文档导入 |
+-| task_summary | 低 | 任务总结 |
+-
+-## 清理测试知识
+-
+-```bash
+-# 预览
+-python scripts/cleanup_test_memories.py --dry-run
+-
+-# 执行清理
+-python scripts/cleanup_test_memories.py --reject --yes
+-```
+diff --git a/tests/test_usage_docs.py b/tests/test_usage_docs.py
+index f970f90..dbff9c9 100644
+--- a/tests/test_usage_docs.py
++++ b/tests/test_usage_docs.py
+@@ -8,9 +8,9 @@ _DOCS = Path(__file__).parent.parent / "docs"
+ _PROMPTS = _DOCS / "prompts"
+ 
+ _REQUIRED_DOCS = [
+-    "claude-code-memory-workflow.md",
+-    "memory-review-guide.md",
+-    "claude-code-mcp-setup.md",
++    "ClaudeCode记忆工作流.md",
++    "知识审核指南.md",
++    "ClaudeCode接入配置.md",
+ ]
+ 
+ _REQUIRED_PROMPTS = [
+@@ -31,12 +31,12 @@ def test_prompts_exist():
+ 
+ 
+ def test_workflow_forbids_auto_propose():
+-    content = (_DOCS / "claude-code-memory-workflow.md").read_text(encoding="utf-8")
++    content = (_DOCS / "ClaudeCode记忆工作流.md").read_text(encoding="utf-8")
+     assert "不允许自动 propose_memory" in content or "默认不允许自动" in content
+ 
+ 
+ def test_workflow_mentions_cc_test():
+-    content = (_DOCS / "claude-code-memory-workflow.md").read_text(encoding="utf-8")
++    content = (_DOCS / "ClaudeCode记忆工作流.md").read_text(encoding="utf-8")
+     assert "[CC_TEST]" in content
+ 
+ 
+@@ -46,6 +46,6 @@ def test_prompt_list_only():
+ 
+ 
+ def test_review_guide_has_standards():
+-    content = (_DOCS / "memory-review-guide.md").read_text(encoding="utf-8")
++    content = (_DOCS / "知识审核指南.md").read_text(encoding="utf-8")
+     assert "可 approve" in content or "可以 approve" in content
+     assert "应 reject" in content or "应该 reject" in content

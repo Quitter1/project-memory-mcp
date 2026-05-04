@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 13.3 — LLM Reviewer hotfix（_parse_llm_response import提前/governance logger补充/exit code）。
+当前阶段：阶段 14 — 源码部署整理（.gitignore/example配置/bootstrap空库/source-deployment文档）。
 
 ## 后续路线
 

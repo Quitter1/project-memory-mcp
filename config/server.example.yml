@@ -1,0 +1,79 @@
+# ================================================================
+# 服务级配置 — project-memory-mcp
+# ================================================================
+
+server:
+  name: "project-memory-mcp"
+  version: "0.1.0"
+  log_level: "INFO"
+  log_file: "data/logs/mcp-server.log"
+
+# 运行期日志
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  file_enabled: true
+  stderr_enabled: true
+  max_bytes: 5242880
+  backup_count: 5
+  redact_sensitive: true
+
+# 数据库
+database:
+  path: "data/memory.db"
+  backup_enabled: false              # MVP 阶段暂不开启自动备份
+
+# Qdrant 连接
+qdrant:
+  enabled: true
+  host: "127.0.0.1"
+  http_port: 6333
+  grpc_port: 6334
+  prefer_grpc: false
+  collection: "project_memory_items_bge_m3"
+  executable_path: "qdrant/qdrant.exe"
+  storage_path: "qdrant/storage"
+  timeout_seconds: 10
+
+# Embedding 配置
+embedding:
+  enabled: true
+  provider: "http"                     # hashing | http
+  dim: 1024
+  model: "BAAI/bge-m3"
+  http:
+    base_url: "http://127.0.0.1:8008"
+    endpoint: "/embed_text"
+    timeout_seconds: 30
+
+# 搜索配置
+search:
+  mode: "hybrid"                       # keyword | vector | hybrid
+  keyword_weight: 0.55
+  vector_weight: 0.45
+  vector_top_k: 30
+  fallback_to_keyword: true
+
+# 审核器
+reviewer:
+  provider: "rule-based"             # rule-based | llm（MVP 用 rule-based）
+  llm_model: null                    # 预留 LLM reviewer 配置
+
+# LLM Reviewer（二次评审）
+llm_reviewer:
+  enabled: false
+  provider: "deepseek"
+  base_url_env: "PROJECT_MEMORY_LLM_BASE_URL"
+  api_key_env: "PROJECT_MEMORY_LLM_API_KEY"
+  model_env: "PROJECT_MEMORY_LLM_MODEL"
+  timeout_seconds: 30
+  max_retries: 1
+  temperature: 0.0
+  max_input_chars: 6000
+  max_output_tokens: 800
+  fail_mode: "pending_review"
+
+# 备份
+backup:
+  jsonl_enabled: false               # MVP 阶段暂不开启
+  output_dir: "data/backups"

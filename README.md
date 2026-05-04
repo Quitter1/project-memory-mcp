@@ -82,7 +82,7 @@ python -m project_memory_mcp
 
 ## Phase 7：真实 MCP 接入验证
 
-Claude Code 配置文档：`docs/claude-code-mcp-setup.md`
+Claude Code 配置文档：`docs/ClaudeCode接入配置.md`
 
 ```bash
 # 验证 MCP server 可启动
@@ -145,7 +145,7 @@ python -m pytest tests/ -v
 4. 人工审核：`python scripts/review_memories.py list --status pending_review`
 5. 测试清理：`python scripts/cleanup_test_memories.py --dry-run`
 
-详细规范见 `docs/claude-code-memory-workflow.md`
+详细规范见 `docs/ClaudeCode记忆工作流.md`
 
 ## 备注
 
