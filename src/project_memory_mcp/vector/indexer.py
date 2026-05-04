@@ -55,6 +55,9 @@ class VectorIndexer:
                     "denied_projects": memory.denied_projects or [],
                     "risk_level": memory.risk_level or "low",
                     "updated_at": memory.updated_at or "",
+                    "embedding_provider": getattr(self.embedder, 'provider', 'unknown'),
+                    "embedding_model": getattr(self.embedder, 'model', 'unknown'),
+                    "embedding_dim": getattr(self.embedder, 'dim', 0),
                 },
             )
             # 更新 SQLite index_status

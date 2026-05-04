@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 10.7 — Qdrant 收口完成（min_vector_score/demo过滤/MCP重启文档/kill脚本）。
+当前阶段：阶段 11.1 — 检索评测收口（SAFE_PAYLOAD白名单/provider/model分离/diagnose分布/scroll兼容）。
 
 ## Qdrant 规则
 

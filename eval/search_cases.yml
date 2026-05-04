@@ -1,0 +1,25 @@
+# 检索评测集 — query 和预期命中 title
+cases:
+  - id: rpa_image_upload_semantic
+    project_id: rpa-electron
+    query: "商品图上传到页面"
+    expected_titles:
+      - "webview 内本地图片上传的安全 IPC 路径"
+    expected_top1: "webview 内本地图片上传的安全 IPC 路径"
+    mode: hybrid
+    notes: "keyword 可能搜不到，vector/hybrid 应能召回"
+
+  - id: rpa_datatransfer_keyword
+    project_id: rpa-electron
+    query: "DataTransfer input files"
+    expected_titles:
+      - "webview 内本地图片上传的安全 IPC 路径"
+    expected_top1: "webview 内本地图片上传的安全 IPC 路径"
+    mode: hybrid
+
+  - id: rpa_webview_architecture
+    project_id: rpa-electron
+    query: "Electron webview RPA"
+    expected_titles:
+      - "Electron RPA 页面嵌入使用 webview"
+    mode: hybrid

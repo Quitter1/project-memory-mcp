@@ -12,6 +12,7 @@ logger = logging.getLogger("project_memory_mcp")
 SAFE_PAYLOAD_FIELDS = {
     "memory_id", "project_id", "scope", "status", "type", "module",
     "tags", "allowed_projects", "denied_projects", "risk_level", "updated_at",
+    "embedding_provider", "embedding_model", "embedding_dim",
 }
 
 DEFAULT_COLLECTION = "project_memory_items"

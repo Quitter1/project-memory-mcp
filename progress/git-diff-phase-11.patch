@@ -1,0 +1,118 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 2e12fbb..129f196 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 10.7 — Qdrant 收口完成（min_vector_score/demo过滤/MCP重启文档/kill脚本）。
++当前阶段：阶段 11.1 — 检索评测收口（SAFE_PAYLOAD白名单/provider/model分离/diagnose分布/scroll兼容）。
+ 
+ ## Qdrant 规则
+ 
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index 9e3cc40..d1650e9 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -202,6 +202,37 @@ def main():
+                 except Exception:
+                     print("  qdrant reachable = no")
+ 
++            # provider/model distribution
++            if qdrant_enabled and db_path.exists():
++                try:
++                    from qdrant_client import QdrantClient
++                    client = QdrantClient(host=qdrant_cfg.get("host", "127.0.0.1"),
++                                          port=qdrant_cfg.get("http_port", 6333), timeout=3)
++                    coll_name = qdrant_cfg.get("collection", "project_memory_items")
++                    if coll_name in [c.name for c in client.get_collections().collections]:
++                        # Sample a few points to check metadata
++                        result = client.scroll(collection_name=coll_name, limit=10, with_payload=True)
++                        raw = result[0] if isinstance(result, tuple) else getattr(result, "points", result)
++                        points = raw if isinstance(raw, list) else list(raw)
++                        providers = {}
++                        missing = 0
++                        for pt in points:
++                            p = pt.payload or {}
++                            key = f"{p.get('embedding_provider','?')} / {p.get('embedding_model','?')} / {p.get('embedding_dim','?')}"
++                            has_meta = p.get('embedding_provider') and p.get('embedding_model')
++                            if has_meta:
++                                providers[key] = providers.get(key, 0) + 1
++                            else:
++                                missing += 1
++                        if providers:
++                            print("  indexed provider/model/dim distribution:")
++                            for k, v in providers.items():
++                                print(f"    {k}: {v}")
++                        if missing > 0:
++                            print(f"  [WARN] {missing} 条向量缺少 embedding_provider/model/dim，请 reindex_vectors.py --yes")
++                except Exception:
++                    pass
++
+             # SQLite counts
+             if db_path.exists():
+                 import sqlite3
+diff --git a/scripts/reindex_vectors.py b/scripts/reindex_vectors.py
+index b4190e2..56d2908 100644
+--- a/scripts/reindex_vectors.py
++++ b/scripts/reindex_vectors.py
+@@ -35,6 +35,12 @@ def main():
+             print("向量索引未启用 (qdrant.enabled=false 或 embedding 不可用)")
+             return 1
+ 
++        if ctx.embedder is not None:
++            print(f"embedding_provider: {getattr(ctx.embedder, 'provider', 'unknown')}")
++            print(f"embedding_model: {getattr(ctx.embedder, 'model', 'unknown')}")
++            print(f"embedding_dim: {getattr(ctx.embedder, 'dim', 0)}")
++        print(f"collection: {ctx.vector_store.collection_name}")
++
+         try:
+             ctx.vector_store.ensure_collection()
+         except Exception as exc:
+diff --git a/src/project_memory_mcp/vector/embeddings.py b/src/project_memory_mcp/vector/embeddings.py
+index f1295f0..ed3bce4 100644
+--- a/src/project_memory_mcp/vector/embeddings.py
++++ b/src/project_memory_mcp/vector/embeddings.py
+@@ -31,6 +31,7 @@ class HashingEmbeddingProvider(BaseEmbeddingProvider):
+     def __init__(self, dim: int = 512, model: str = "hashing-v1"):
+         self.dim = dim
+         self.model = model
++        self.provider = "hashing"
+ 
+     def embed_text(self, text: str) -> list[float]:
+         if not text:
+@@ -74,6 +75,7 @@ class HttpEmbeddingProvider(BaseEmbeddingProvider):
+     ):
+         self.dim = dim
+         self.model = model
++        self.provider = "http"
+         self.base_url = base_url.rstrip("/")
+         self.endpoint = endpoint
+         self.timeout = timeout_seconds
+diff --git a/src/project_memory_mcp/vector/indexer.py b/src/project_memory_mcp/vector/indexer.py
+index 24b60a3..102595d 100644
+--- a/src/project_memory_mcp/vector/indexer.py
++++ b/src/project_memory_mcp/vector/indexer.py
+@@ -55,6 +55,9 @@ class VectorIndexer:
+                     "denied_projects": memory.denied_projects or [],
+                     "risk_level": memory.risk_level or "low",
+                     "updated_at": memory.updated_at or "",
++                    "embedding_provider": getattr(self.embedder, 'provider', 'unknown'),
++                    "embedding_model": getattr(self.embedder, 'model', 'unknown'),
++                    "embedding_dim": getattr(self.embedder, 'dim', 0),
+                 },
+             )
+             # 更新 SQLite index_status
+diff --git a/src/project_memory_mcp/vector/qdrant_store.py b/src/project_memory_mcp/vector/qdrant_store.py
+index f5efb75..153b2b2 100644
+--- a/src/project_memory_mcp/vector/qdrant_store.py
++++ b/src/project_memory_mcp/vector/qdrant_store.py
+@@ -12,6 +12,7 @@ logger = logging.getLogger("project_memory_mcp")
+ SAFE_PAYLOAD_FIELDS = {
+     "memory_id", "project_id", "scope", "status", "type", "module",
+     "tags", "allowed_projects", "denied_projects", "risk_level", "updated_at",
++    "embedding_provider", "embedding_model", "embedding_dim",
+ }
+ 
+ DEFAULT_COLLECTION = "project_memory_items"

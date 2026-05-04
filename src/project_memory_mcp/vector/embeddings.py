@@ -31,6 +31,7 @@ class HashingEmbeddingProvider(BaseEmbeddingProvider):
     def __init__(self, dim: int = 512, model: str = "hashing-v1"):
         self.dim = dim
         self.model = model
+        self.provider = "hashing"
 
     def embed_text(self, text: str) -> list[float]:
         if not text:
@@ -74,6 +75,7 @@ class HttpEmbeddingProvider(BaseEmbeddingProvider):
     ):
         self.dim = dim
         self.model = model
+        self.provider = "http"
         self.base_url = base_url.rstrip("/")
         self.endpoint = endpoint
         self.timeout = timeout_seconds

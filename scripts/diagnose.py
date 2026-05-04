@@ -202,6 +202,37 @@ def main():
                 except Exception:
                     print("  qdrant reachable = no")
 
+            # provider/model distribution
+            if qdrant_enabled and db_path.exists():
+                try:
+                    from qdrant_client import QdrantClient
+                    client = QdrantClient(host=qdrant_cfg.get("host", "127.0.0.1"),
+                                          port=qdrant_cfg.get("http_port", 6333), timeout=3)
+                    coll_name = qdrant_cfg.get("collection", "project_memory_items")
+                    if coll_name in [c.name for c in client.get_collections().collections]:
+                        # Sample a few points to check metadata
+                        result = client.scroll(collection_name=coll_name, limit=10, with_payload=True)
+                        raw = result[0] if isinstance(result, tuple) else getattr(result, "points", result)
+                        points = raw if isinstance(raw, list) else list(raw)
+                        providers = {}
+                        missing = 0
+                        for pt in points:
+                            p = pt.payload or {}
+                            key = f"{p.get('embedding_provider','?')} / {p.get('embedding_model','?')} / {p.get('embedding_dim','?')}"
+                            has_meta = p.get('embedding_provider') and p.get('embedding_model')
+                            if has_meta:
+                                providers[key] = providers.get(key, 0) + 1
+                            else:
+                                missing += 1
+                        if providers:
+                            print("  indexed provider/model/dim distribution:")
+                            for k, v in providers.items():
+                                print(f"    {k}: {v}")
+                        if missing > 0:
+                            print(f"  [WARN] {missing} 条向量缺少 embedding_provider/model/dim，请 reindex_vectors.py --yes")
+                except Exception:
+                    pass
+
             # SQLite counts
             if db_path.exists():
                 import sqlite3

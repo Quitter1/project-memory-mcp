@@ -35,6 +35,12 @@ def main():
             print("向量索引未启用 (qdrant.enabled=false 或 embedding 不可用)")
             return 1
 
+        if ctx.embedder is not None:
+            print(f"embedding_provider: {getattr(ctx.embedder, 'provider', 'unknown')}")
+            print(f"embedding_model: {getattr(ctx.embedder, 'model', 'unknown')}")
+            print(f"embedding_dim: {getattr(ctx.embedder, 'dim', 0)}")
+        print(f"collection: {ctx.vector_store.collection_name}")
+
         try:
             ctx.vector_store.ensure_collection()
         except Exception as exc:
