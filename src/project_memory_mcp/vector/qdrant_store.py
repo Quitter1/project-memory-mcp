@@ -97,9 +97,22 @@ class QdrantVectorStore:
         logger.info("qdrant_upsert: memory_id=%s", memory_id)
 
     def delete_memory(self, memory_id: str) -> None:
+        from qdrant_client.models import PointIdsList
         client = self._ensure_client()
-        client.delete(collection_name=self.collection_name, points_selector=[memory_id])
+        client.delete(
+            collection_name=self.collection_name,
+            points_selector=PointIdsList(points=[memory_id]),
+        )
         logger.info("qdrant_delete: memory_id=%s", memory_id)
+
+    def count_points(self) -> int:
+        """返回当前 collection 的 points 数量。"""
+        try:
+            client = self._ensure_client()
+            result = client.count(collection_name=self.collection_name, exact=True)
+            return result.count if hasattr(result, "count") else 0
+        except Exception:
+            return 0
 
     def search(
         self,
@@ -129,14 +142,30 @@ class QdrantVectorStore:
         elif scope_filter == "shared":
             must_conditions.append(FieldCondition(key="scope", match=MatchValue(value="shared")))
 
-        results = client.search(
-            collection_name=self.collection_name,
-            query_vector=vector,
-            query_filter=Filter(must=must_conditions),
-            limit=top_k,
-            with_payload=True,
-        )
+        qfilter = Filter(must=must_conditions)
+
+        # qdrant-client 1.17+: query_points; old: search
+        if hasattr(client, "query_points"):
+            result = client.query_points(
+                collection_name=self.collection_name,
+                query=vector,
+                query_filter=qfilter,
+                limit=top_k,
+                with_payload=True,
+            )
+            points = result.points if hasattr(result, "points") else result
+        elif hasattr(client, "search"):
+            points = client.search(
+                collection_name=self.collection_name,
+                query_vector=vector,
+                query_filter=qfilter,
+                limit=top_k,
+                with_payload=True,
+            )
+        else:
+            raise QdrantStoreError("当前 qdrant-client 不支持 query_points/search")
+
         return [
-            {"id": r.id, "score": r.score, "payload": r.payload}
-            for r in results
+            {"id": p.id, "score": p.score, "payload": p.payload}
+            for p in points
         ]

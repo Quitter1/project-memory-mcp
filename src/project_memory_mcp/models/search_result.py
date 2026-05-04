@@ -33,3 +33,7 @@ class SearchResultSet:
     total_returned: int = 0     # 实际返回总数（截断后）
     search_method: str = "keyword"
     fallback_activated: bool = False
+    fallback_reason: str = ""
+    keyword_count: int = 0
+    vector_count: int = 0
+    hybrid_count: int = 0

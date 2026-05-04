@@ -45,9 +45,12 @@ def handle(ctx, params: dict) -> dict:
             "project_resolved": True,
             "context_pack": result_set.context_pack,
             "total_found": result_set.total_found,
-            "total_returned": getattr(result_set, "total_returned", 0),
-            "search_method": getattr(result_set, "search_method", "keyword"),
-            "fallback_activated": getattr(result_set, "fallback_activated", False),
+            "total_returned": result_set.total_returned,
+            "search_method": result_set.search_method,
+            "fallback_activated": result_set.fallback_activated,
+            "keyword_count": result_set.keyword_count,
+            "vector_count": result_set.vector_count,
+            "hybrid_count": result_set.hybrid_count,
         })
     except Exception as exc:
         import logging

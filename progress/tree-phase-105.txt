@@ -23,7 +23,6 @@ progress/git-diff-phase-102.patch
 progress/git-diff-phase-103.patch
 progress/git-diff-phase-104.patch
 progress/git-diff-phase-105.patch
-progress/git-diff-phase-106.patch
 progress/git-diff-phase-2.patch
 progress/git-diff-phase-25.patch
 progress/git-diff-phase-26.patch
@@ -63,7 +62,6 @@ progress/git-status-phase-102.txt
 progress/git-status-phase-103.txt
 progress/git-status-phase-104.txt
 progress/git-status-phase-105.txt
-progress/git-status-phase-106.txt
 progress/git-status-phase-2.txt
 progress/git-status-phase-25.txt
 progress/git-status-phase-26.txt
@@ -105,7 +103,6 @@ progress/phase-103-summary.md
 progress/phase-104-summary.md
 progress/phase-105-summary.md
 progress/phase-105b-summary.md
-progress/phase-106-summary.md
 progress/phase-2-summary.md
 progress/phase-2.5-summary.md
 progress/phase-2.6-summary.md
@@ -146,7 +143,6 @@ progress/test-output-phase-102.txt
 progress/test-output-phase-103.txt
 progress/test-output-phase-104.txt
 progress/test-output-phase-105.txt
-progress/test-output-phase-106.txt
 progress/test-output-phase-2.txt
 progress/test-output-phase-25.txt
 progress/test-output-phase-26.txt
@@ -186,7 +182,6 @@ progress/tree-phase-102.txt
 progress/tree-phase-103.txt
 progress/tree-phase-104.txt
 progress/tree-phase-105.txt
-progress/tree-phase-106.txt
 progress/tree-phase-2.txt
 progress/tree-phase-25.txt
 progress/tree-phase-26.txt
@@ -229,9 +224,7 @@ scripts/dev_check.py
 scripts/diagnose.py
 scripts/init_db.py
 scripts/keyword_search_demo.py
-scripts/kill_mcp_processes.ps1
 scripts/make_review_pack.py
-scripts/mcp_search_smoke.py
 scripts/reindex_vectors.py
 scripts/review_memories.py
 scripts/run_demo_flow.py

@@ -84,6 +84,7 @@ def main():
     parser.add_argument("--recent-errors", action="store_true", help="显示 errors.log 最后 50 行")
     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
     parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
+    parser.add_argument("--vector-summary", action="store_true", help="显示向量索引状态")
     args = parser.parse_args()
 
     config_dir, db_path = _paths.get_project_paths()
@@ -164,6 +165,66 @@ def main():
             conn.close()
         else:
             print("  数据库不存在")
+
+    # 7. vector-summary
+    if args.vector_summary:
+        print(f"\n[7] 向量索引摘要")
+        try:
+            import yaml
+            server_yml = config_dir / "server.yml"
+            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8")) if server_yml.exists() else {}
+            qdrant_cfg = raw.get("qdrant", {}) if raw else {}
+            embed_cfg = raw.get("embedding", {}) if raw else {}
+
+            qdrant_enabled = qdrant_cfg.get("enabled", False)
+            print(f"  qdrant.enabled = {qdrant_enabled}")
+            print(f"  embedding.provider = {embed_cfg.get('provider', 'hashing')}")
+            print(f"  embedding.dim = {embed_cfg.get('dim', 512)}")
+            print(f"  collection = {qdrant_cfg.get('collection', 'project_memory_items')}")
+
+            # Qdrant reachable?
+            if qdrant_enabled and db_path.exists():
+                try:
+                    from qdrant_client import QdrantClient
+                    client = QdrantClient(
+                        host=qdrant_cfg.get("host", "127.0.0.1"),
+                        port=qdrant_cfg.get("http_port", 6333),
+                        timeout=3,
+                    )
+                    coll_name = qdrant_cfg.get("collection", "project_memory_items")
+                    colls = [c.name for c in client.get_collections().collections]
+                    if coll_name in colls:
+                        info = client.get_collection(coll_name)
+                        cnt = info.points_count if hasattr(info, 'points_count') else '?'
+                        print(f"  qdrant reachable = yes, points = {cnt}")
+                    else:
+                        print(f"  qdrant reachable = yes, collection 未创建")
+                except Exception:
+                    print("  qdrant reachable = no")
+
+            # SQLite counts
+            if db_path.exists():
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON")
+                approved = conn.execute(
+                    "SELECT COUNT(*) FROM memory_items WHERE status='approved'"
+                ).fetchone()[0]
+                indexed_n = conn.execute(
+                    "SELECT COUNT(*) FROM memory_items WHERE status='approved' AND index_status='indexed'"
+                ).fetchone()[0]
+                failed_n = conn.execute(
+                    "SELECT COUNT(*) FROM memory_items WHERE index_status='index_failed'"
+                ).fetchone()[0]
+                not_indexed = approved - indexed_n
+                print(f"  approved memories = {approved}")
+                print(f"  indexed (index_status) = {indexed_n}")
+                print(f"  index_failed = {failed_n}")
+                print(f"  not_indexed approved = {not_indexed}")
+                conn.close()
+        except Exception as exc:
+            print(f"  向量摘要获取失败: {exc}")
 
     # 6. review-summary
     if args.review_summary:

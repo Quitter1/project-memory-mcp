@@ -78,10 +78,20 @@ class AppContext:
 
         # 5. 检索服务 + 向量
         self._init_vector()
+        import yaml
+        search_cfg = {}
+        server_yml = self.config_dir / "server.yml"
+        if server_yml.exists():
+            try:
+                raw = yaml.safe_load(server_yml.read_text(encoding="utf-8"))
+                search_cfg = raw.get("search", {}) if raw else {}
+            except Exception:
+                pass
         self.search_service = KnowledgeSearchService(
             conn=self.conn,
             vector_store=self.vector_store,
             embedder=self.embedder,
+            search_config=search_cfg,
         )
 
         # 6. 知识治理
@@ -215,8 +225,11 @@ class AppContext:
 
         logging.getLogger("project_memory_mcp").info(
             "app_context_ready user_version=%s project_count=%s memory_count=%s "
-            "audit_log_count=%s qdrant_enabled=false llm_reviewer_enabled=false",
+            "audit_log_count=%s qdrant_enabled=%s embedding_enabled=%s search_mode=%s",
             uv, n_p, n_m, n_a,
+            "true" if self.vector_store is not None else "false",
+            "true" if self.embedder is not None else "false",
+            getattr(self.search_service, "mode", "keyword"),
         )
 
     def sync_projects(self) -> int:

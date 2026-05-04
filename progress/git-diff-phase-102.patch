@@ -1,0 +1,328 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 6712c5f..2a5b4f1 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -147,7 +147,7 @@
+ 
+ 详见 docs/architecture.md 和项目 plan 文件。
+ 
+-当前阶段：阶段 10 — Qdrant + embedding + 向量索引 + 混合搜索基础框架。
++当前阶段：阶段 10.2 — Qdrant 收口（query_points兼容/reindex变量初始化/index_status更新/hybrid merge/search API修复）。
+ 
+ ## Qdrant 规则
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 6c6c2fa..bc58cf3 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -15,6 +15,12 @@ dependencies = [
+ dev = [
+     "pytest>=8.0",
+     "pytest-asyncio>=0.23",
++    "qdrant-client>=1.10",
++    "httpx>=0.25",
++]
++vector = [
++    "qdrant-client>=1.10",
++    "httpx>=0.25",
+ ]
+ 
+ [build-system]
+diff --git a/scripts/check_qdrant.py b/scripts/check_qdrant.py
+index e021274..3fe226d 100644
+--- a/scripts/check_qdrant.py
++++ b/scripts/check_qdrant.py
+@@ -65,6 +65,12 @@ def main():
+             print(f"  [OK] collection '{collection_name}' 存在")
+             info = client.get_collection(collection_name)
+             print(f"    vector dim={info.config.params.vectors.size}")
++            try:
++                cnt = client.count(collection_name=collection_name, exact=True)
++                n = cnt.count if hasattr(cnt, "count") else "?"
++                print(f"    points = {n}")
++            except Exception:
++                print("    points = ? (count failed)")
+         else:
+             print(f"  [INFO] collection '{collection_name}' 尚未创建")
+             print(f"  可用 collections: {names}")
+diff --git a/scripts/diagnose.py b/scripts/diagnose.py
+index 58910c7..9e3cc40 100644
+--- a/scripts/diagnose.py
++++ b/scripts/diagnose.py
+@@ -84,6 +84,7 @@ def main():
+     parser.add_argument("--recent-errors", action="store_true", help="显示 errors.log 最后 50 行")
+     parser.add_argument("--recent-audit", action="store_true", help="显示最近 20 条 audit_log")
+     parser.add_argument("--review-summary", action="store_true", help="显示待审核/测试知识统计")
++    parser.add_argument("--vector-summary", action="store_true", help="显示向量索引状态")
+     args = parser.parse_args()
+ 
+     config_dir, db_path = _paths.get_project_paths()
+@@ -165,6 +166,66 @@ def main():
+         else:
+             print("  数据库不存在")
+ 
++    # 7. vector-summary
++    if args.vector_summary:
++        print(f"\n[7] 向量索引摘要")
++        try:
++            import yaml
++            server_yml = config_dir / "server.yml"
++            raw = yaml.safe_load(server_yml.read_text(encoding="utf-8")) if server_yml.exists() else {}
++            qdrant_cfg = raw.get("qdrant", {}) if raw else {}
++            embed_cfg = raw.get("embedding", {}) if raw else {}
++
++            qdrant_enabled = qdrant_cfg.get("enabled", False)
++            print(f"  qdrant.enabled = {qdrant_enabled}")
++            print(f"  embedding.provider = {embed_cfg.get('provider', 'hashing')}")
++            print(f"  embedding.dim = {embed_cfg.get('dim', 512)}")
++            print(f"  collection = {qdrant_cfg.get('collection', 'project_memory_items')}")
++
++            # Qdrant reachable?
++            if qdrant_enabled and db_path.exists():
++                try:
++                    from qdrant_client import QdrantClient
++                    client = QdrantClient(
++                        host=qdrant_cfg.get("host", "127.0.0.1"),
++                        port=qdrant_cfg.get("http_port", 6333),
++                        timeout=3,
++                    )
++                    coll_name = qdrant_cfg.get("collection", "project_memory_items")
++                    colls = [c.name for c in client.get_collections().collections]
++                    if coll_name in colls:
++                        info = client.get_collection(coll_name)
++                        cnt = info.points_count if hasattr(info, 'points_count') else '?'
++                        print(f"  qdrant reachable = yes, points = {cnt}")
++                    else:
++                        print(f"  qdrant reachable = yes, collection 未创建")
++                except Exception:
++                    print("  qdrant reachable = no")
++
++            # SQLite counts
++            if db_path.exists():
++                import sqlite3
++                conn = sqlite3.connect(str(db_path))
++                conn.row_factory = sqlite3.Row
++                conn.execute("PRAGMA foreign_keys = ON")
++                approved = conn.execute(
++                    "SELECT COUNT(*) FROM memory_items WHERE status='approved'"
++                ).fetchone()[0]
++                indexed_n = conn.execute(
++                    "SELECT COUNT(*) FROM memory_items WHERE status='approved' AND index_status='indexed'"
++                ).fetchone()[0]
++                failed_n = conn.execute(
++                    "SELECT COUNT(*) FROM memory_items WHERE index_status='index_failed'"
++                ).fetchone()[0]
++                not_indexed = approved - indexed_n
++                print(f"  approved memories = {approved}")
++                print(f"  indexed (index_status) = {indexed_n}")
++                print(f"  index_failed = {failed_n}")
++                print(f"  not_indexed approved = {not_indexed}")
++                conn.close()
++        except Exception as exc:
++            print(f"  向量摘要获取失败: {exc}")
++
+     # 6. review-summary
+     if args.review_summary:
+         print(f"\n[6] 审核摘要")
+diff --git a/scripts/reindex_vectors.py b/scripts/reindex_vectors.py
+index 569c315..320358d 100644
+--- a/scripts/reindex_vectors.py
++++ b/scripts/reindex_vectors.py
+@@ -33,23 +33,26 @@ def main():
+     try:
+         if ctx.vector_indexer is None:
+             print("向量索引未启用 (qdrant.enabled=false 或 embedding 不可用)")
+-            return
++            return 1
+ 
+-        ctx.vector_store.ensure_collection()
++        try:
++            ctx.vector_store.ensure_collection()
++        except Exception as exc:
++            print(f"Qdrant collection 创建失败: {exc}")
++            return 1
+ 
+         if args.yes:
+-            result = ctx.vector_indexer.reindex_all(project_id=args.project, dry_run=False)
++            result = ctx.vector_indexer.reindex_all(
++                project_id=args.project, dry_run=False,
++                project_repo=ctx.project_repo,
++            )
+         else:
+-            # 只用 memory_repo 统计
+-            if args.project:
+-                items = ctx.memory_repo.list_memories(project_id=args.project, limit=10000)
+-            else:
+-                all_projects = ctx.config_loader.list_active_projects()
+-                items = []
+-                for prj in all_projects:
+-                    items.extend(ctx.memory_repo.list_memories(project_id=prj.id, limit=10000))
+-            approved = [m for m in items if m.status == "approved"]
+-            result = {"eligible": len(approved), "indexed": 0, "failed": 0, "skipped": 0}
++            result = ctx.vector_indexer.reindex_all(
++                project_id=args.project, dry_run=True,
++                project_repo=ctx.project_repo,
++            )
++            result["indexed"] = 0
++            result["failed"] = 0
+ 
+         print(f"eligible: {result['eligible']}")
+         if not args.yes:
+diff --git a/src/project_memory_mcp/vector/indexer.py b/src/project_memory_mcp/vector/indexer.py
+index e755035..24b60a3 100644
+--- a/src/project_memory_mcp/vector/indexer.py
++++ b/src/project_memory_mcp/vector/indexer.py
+@@ -57,10 +57,28 @@ class VectorIndexer:
+                     "updated_at": memory.updated_at or "",
+                 },
+             )
++            # 更新 SQLite index_status
++            try:
++                self.memory_repo.conn.execute(
++                    "UPDATE memory_items SET index_status='indexed', updated_at=datetime('now') WHERE id=?",
++                    (memory.id,),
++                )
++                self.memory_repo.conn.commit()
++            except Exception:
++                pass
++
+             logger.info("vector_indexed: memory_id=%s", memory.id)
+             return True
+         except Exception as exc:
+             logger.error("vector_index_failed: memory_id=%s exc_type=%s", memory.id, type(exc).__name__)
++            try:
++                self.memory_repo.conn.execute(
++                    "UPDATE memory_items SET index_status='index_failed', updated_at=datetime('now') WHERE id=?",
++                    (memory.id,),
++                )
++                self.memory_repo.conn.commit()
++            except Exception:
++                pass
+             return False
+ 
+     def delete_memory(self, memory_id: str) -> bool:
+@@ -74,22 +92,36 @@ class VectorIndexer:
+             logger.error("vector_delete_failed: memory_id=%s exc_type=%s", memory_id, type(exc).__name__)
+             return False
+ 
+-    def reindex_all(self, project_id: str | None = None, dry_run: bool = False) -> dict:
+-        """重建所有 approved 知识的向量索引。"""
+-        if not self._enabled:
+-            return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
++    def reindex_all(self, project_id: str | None = None, dry_run: bool = False,
++                    project_repo=None) -> dict:
++        """重建所有 approved 知识的向量索引。
+ 
++        project_id 不传时遍历 project_repo 所有 active 项目。
++        """
+         eligible = 0
+         indexed = 0
+         failed = 0
++        skipped = 0
++
++        if not self._enabled:
++            return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
+ 
+         if project_id:
+-            items = self.memory_repo.list_memories(project_id=project_id, limit=10000)
++            items = self.memory_repo.list_memories(
++                project_id=project_id, status_filter=["approved"], limit=10000,
++            )
+         else:
+-            items = self.memory_repo.list_memories(status_filter=["approved"], limit=10000)
+-            if not project_id:
+-                # filter approved manually when listing all
+-                pass
++            items = []
++            if project_repo is not None:
++                try:
++                    for p in project_repo.list_active():
++                        items.extend(self.memory_repo.list_memories(
++                            project_id=p.id, status_filter=["approved"], limit=5000,
++                        ))
++                except AttributeError:
++                    pass
++            if not items:
++                return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
+ 
+         approved_items = [m for m in items if m.status == "approved"]
+         eligible = len(approved_items)
+@@ -105,5 +137,8 @@ class VectorIndexer:
+             else:
+                 failed += 1
+ 
+-        logger.info("reindex_complete: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
++        if failed > 0:
++            logger.warning("reindex_with_errors: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
++        else:
++            logger.info("reindex_complete: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
+         return {"eligible": eligible, "indexed": indexed, "failed": failed, "skipped": 0}
+diff --git a/src/project_memory_mcp/vector/qdrant_store.py b/src/project_memory_mcp/vector/qdrant_store.py
+index 42a2989..f5efb75 100644
+--- a/src/project_memory_mcp/vector/qdrant_store.py
++++ b/src/project_memory_mcp/vector/qdrant_store.py
+@@ -97,10 +97,23 @@ class QdrantVectorStore:
+         logger.info("qdrant_upsert: memory_id=%s", memory_id)
+ 
+     def delete_memory(self, memory_id: str) -> None:
++        from qdrant_client.models import PointIdsList
+         client = self._ensure_client()
+-        client.delete(collection_name=self.collection_name, points_selector=[memory_id])
++        client.delete(
++            collection_name=self.collection_name,
++            points_selector=PointIdsList(points=[memory_id]),
++        )
+         logger.info("qdrant_delete: memory_id=%s", memory_id)
+ 
++    def count_points(self) -> int:
++        """返回当前 collection 的 points 数量。"""
++        try:
++            client = self._ensure_client()
++            result = client.count(collection_name=self.collection_name, exact=True)
++            return result.count if hasattr(result, "count") else 0
++        except Exception:
++            return 0
++
+     def search(
+         self,
+         vector: list[float],
+@@ -129,14 +142,30 @@ class QdrantVectorStore:
+         elif scope_filter == "shared":
+             must_conditions.append(FieldCondition(key="scope", match=MatchValue(value="shared")))
+ 
+-        results = client.search(
+-            collection_name=self.collection_name,
+-            query_vector=vector,
+-            query_filter=Filter(must=must_conditions),
+-            limit=top_k,
+-            with_payload=True,
+-        )
++        qfilter = Filter(must=must_conditions)
++
++        # qdrant-client 1.17+: query_points; old: search
++        if hasattr(client, "query_points"):
++            result = client.query_points(
++                collection_name=self.collection_name,
++                query=vector,
++                query_filter=qfilter,
++                limit=top_k,
++                with_payload=True,
++            )
++            points = result.points if hasattr(result, "points") else result
++        elif hasattr(client, "search"):
++            points = client.search(
++                collection_name=self.collection_name,
++                query_vector=vector,
++                query_filter=qfilter,
++                limit=top_k,
++                with_payload=True,
++            )
++        else:
++            raise QdrantStoreError("当前 qdrant-client 不支持 query_points/search")
++
+         return [
+-            {"id": r.id, "score": r.score, "payload": r.payload}
+-            for r in results
++            {"id": p.id, "score": p.score, "payload": p.payload}
++            for p in points
+         ]

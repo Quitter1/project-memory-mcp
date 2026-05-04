@@ -394,5 +394,5 @@ tests/test_vector_indexer.py::test_indexer_skip_pending PASSED           [ 99%]
 tests/test_vector_indexer.py::test_indexer_delete PASSED                 [ 99%]
 tests/test_vector_indexer.py::test_reindex_disabled_without_memory_repo PASSED [100%]
 
-============================ 386 passed in 12.86s =============================
+============================ 386 passed in 11.85s =============================
 

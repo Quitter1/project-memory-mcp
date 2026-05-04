@@ -1,11 +1,15 @@
 """KeywordSearchService — SQLite LIKE 搜索，参数化查询，多字段打分。"""
 
 import json
+import logging
 import re
 import sqlite3
+import time
 
 from ..models.search_result import SearchResult
 from .filter_builder import FilterBuilder
+
+logger = logging.getLogger("project_memory_mcp")
 
 _TOKENIZE_RE = re.compile(r"\s+")
 
@@ -78,6 +82,9 @@ class KeywordSearchService:
         keywords = self._tokenize(query)
         all_results: list[SearchResult] = []
 
+        t0 = time.monotonic()
+        logger.info("keyword_search_started project_id=%s query_len=%d", project_id, len(query))
+
         # 1. project scope
         all_results.extend(
             self._search_project_scope(
@@ -85,6 +92,11 @@ class KeywordSearchService:
                 include_candidates, modules, types, tags, min_confidence, max_results,
             )
         )
+        t1 = time.monotonic()
+        ms1 = (t1 - t0) * 1000
+        logger.info("keyword_project_sql_done count=%d elapsed_ms=%.1f", len(all_results), ms1)
+        if ms1 > 1000:
+            logger.warning("keyword_sql_slow scope=project elapsed_ms=%.1f", ms1)
 
         # 2. shared scope
         internal_limit = max(max_results * 3, 50)
@@ -94,12 +106,21 @@ class KeywordSearchService:
                     keywords, project_id, modules, types, tags, min_confidence, internal_limit,
                 )
             )
+        t2 = time.monotonic()
+        ms2 = (t2 - t1) * 1000
+        sc = len(all_results)  # count so far
+        logger.info("keyword_shared_sql_done elapsed_ms=%.1f", ms2)
+        if ms2 > 1000:
+            logger.warning("keyword_sql_slow scope=shared elapsed_ms=%.1f", ms2)
 
         # 3. global scope
         if include_global:
             all_results.extend(
                 self._search_global_scope(keywords, modules, types, tags, min_confidence, internal_limit)
             )
+        t3 = time.monotonic()
+        ms3 = (t3 - t2) * 1000
+        logger.info("keyword_global_sql_done elapsed_ms=%.1f", ms3)
 
         # 去重（同 id 取最高分）
         seen: dict[str, SearchResult] = {}
@@ -109,7 +130,9 @@ class KeywordSearchService:
 
         deduped = list(seen.values())
         deduped.sort(key=lambda x: -x.relevance_score)
-        # 不在此处截断，由 KnowledgeSearchService 统一按 max_results 截断
+        t4 = time.monotonic()
+        ms4 = (t4 - t0) * 1000
+        logger.info("keyword_search_done total=%d elapsed_ms=%.1f", len(deduped), ms4)
         return deduped
 
     def search_empty(

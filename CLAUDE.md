@@ -147,7 +147,7 @@
 
 详见 docs/architecture.md 和项目 plan 文件。
 
-当前阶段：阶段 10 — Qdrant + embedding + 向量索引 + 混合搜索基础框架。
+当前阶段：阶段 10.7 — Qdrant 收口完成（min_vector_score/demo过滤/MCP重启文档/kill脚本）。
 
 ## Qdrant 规则
 

@@ -65,6 +65,12 @@ def main():
             print(f"  [OK] collection '{collection_name}' 存在")
             info = client.get_collection(collection_name)
             print(f"    vector dim={info.config.params.vectors.size}")
+            try:
+                cnt = client.count(collection_name=collection_name, exact=True)
+                n = cnt.count if hasattr(cnt, "count") else "?"
+                print(f"    points = {n}")
+            except Exception:
+                print("    points = ? (count failed)")
         else:
             print(f"  [INFO] collection '{collection_name}' 尚未创建")
             print(f"  可用 collections: {names}")
@@ -76,8 +82,43 @@ def main():
     print(f"\n{'=' * 50}")
     print("  Qdrant 连接检查通过")
     print(f"{'=' * 50}")
+    # 4. warmup (optional)
+    if "--warmup" in sys.argv:
+        import time
+        print("\n[4] warmup")
+        try:
+            t0 = time.monotonic()
+            cnt = client.count(collection_name=collection_name, exact=True)
+            elapsed = (time.monotonic() - t0) * 1000
+            n = cnt.count if hasattr(cnt, "count") else "?"
+            print(f"  count: {n} ({elapsed:.0f}ms)")
+            if elapsed > 3000:
+                print(f"  [WARN] count 耗时超过 3s: {elapsed:.0f}ms")
+
+            t0 = time.monotonic()
+            vec = [0.0] * embed_cfg.get("dim", 512)
+            try:
+                from qdrant_client.models import Filter
+                client.query_points(
+                    collection_name=collection_name,
+                    query=vec, limit=1,
+                )
+                elapsed2 = (time.monotonic() - t0) * 1000
+                print(f"  query: {elapsed2:.0f}ms")
+                if elapsed2 > 3000:
+                    print(f"  [WARN] query_points 耗时超过 3s: {elapsed2:.0f}ms")
+            except AttributeError:
+                client.search(
+                    collection_name=collection_name,
+                    query_vector=vec, limit=1,
+                )
+                elapsed2 = (time.monotonic() - t0) * 1000
+                print(f"  query (search): {elapsed2:.0f}ms")
+        except Exception as exc:
+            print(f"  [FAIL] warmup 失败: {type(exc).__name__}")
+
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

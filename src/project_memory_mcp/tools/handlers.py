@@ -154,6 +154,12 @@ class ToolHandler:
     def _dispatch(self, tool: str, module_name: str, params: dict) -> dict:
         request_id = new_request_id()
         _log_tool_start(tool, request_id, params)
+
+        pid = params.get("project_id") or "?"
+        logger.info("tool_started request_id=%s tool=%s project=%s query_len=%d",
+                     request_id, tool, pid,
+                     len(str(params.get("query", ""))) if "query" in params else 0)
+
         t0 = time.monotonic()
 
         try:
@@ -181,10 +187,14 @@ class ToolHandler:
         if result.get("ok"):
             result["request_id"] = request_id
             _log_tool_success(tool, request_id, duration_ms)
+            logger.info("tool_done request_id=%s tool=%s elapsed_ms=%.1f ok=true",
+                        request_id, tool, duration_ms)
         else:
             result["request_id"] = request_id
             code = result.get("error", {}).get("code", "unknown")
             _log_tool_error(tool, request_id, code, duration_ms)
+            logger.info("tool_done request_id=%s tool=%s elapsed_ms=%.1f ok=false code=%s",
+                        request_id, tool, duration_ms, code)
 
         # 搜索诊断日志
         if tool == "search_project_context" and result.get("ok"):

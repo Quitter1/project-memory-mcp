@@ -37,7 +37,7 @@ qdrant:
 
 # Embedding 配置
 embedding:
-  enabled: false
+  enabled: true
   provider: "hashing"                  # hashing | http
   dim: 512
   model: "hashing-v1"

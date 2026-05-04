@@ -1,5 +1,5 @@
 diff --git a/CLAUDE.md b/CLAUDE.md
-index 6712c5f..2e12fbb 100644
+index 6712c5f..b9bc305 100644
 --- a/CLAUDE.md
 +++ b/CLAUDE.md
 @@ -147,7 +147,7 @@
@@ -7,225 +7,10 @@ index 6712c5f..2e12fbb 100644
  详见 docs/architecture.md 和项目 plan 文件。
  
 -当前阶段：阶段 10 — Qdrant + embedding + 向量索引 + 混合搜索基础框架。
-+当前阶段：阶段 10.7 — Qdrant 收口完成（min_vector_score/demo过滤/MCP重启文档/kill脚本）。
++当前阶段：阶段 10.3 — Qdrant 收口（search_project_context hybrid接入/SearchResultSet新字段/vector→SQLite回读/fallback语义）。
  
  ## Qdrant 规则
  
-diff --git a/config/server.yml b/config/server.yml
-index d81387e..9ed5455 100644
---- a/config/server.yml
-+++ b/config/server.yml
-@@ -37,7 +37,7 @@ qdrant:
- 
- # Embedding 配置
- embedding:
--  enabled: false
-+  enabled: true
-   provider: "hashing"                  # hashing | http
-   dim: 512
-   model: "hashing-v1"
-diff --git a/docs/claude-code-mcp-setup.md b/docs/claude-code-mcp-setup.md
-index 0c1efdc..40cb8b0 100644
---- a/docs/claude-code-mcp-setup.md
-+++ b/docs/claude-code-mcp-setup.md
-@@ -59,4 +59,29 @@ python scripts/diagnose.py
- | 没有 `memory.db` | `python scripts/init_db.py && python scripts/sync_projects.py` |
- | MCP 启动后"卡住" | 正常 — stdio server 在等待客户端请求 |
- | Claude Code 看不到 tools | 检查 command/args/env，查看 `logs/errors.log` |
-+| MCP 搜索慢/卡住 | 更新代码或配置后必须重启 Claude Code 清理旧进程 |
-+
-+## 更新代码/配置后必须重启
-+
-+修改 `config/server.yml` 或更新 Python 代码后，Claude Code 可能仍连接旧的 MCP server 进程。
-+
-+清理方法（Windows PowerShell）：
-+
-+```powershell
-+# 查看残留进程
-+powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1
-+
-+# 终止残留进程
-+powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1 -Kill
-+```
-+
-+或手动：
-+
-+```powershell
-+Get-CimInstance Win32_Process |
-+  Where-Object { $_.CommandLine -match "project_memory_mcp" } |
-+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-+```
-+
-+清理后 Claude Code 下次调用 MCP 时会重新启动 server。
- | `project_not_found` | 确保 `config/projects.yml` 包含对应项目 |
-diff --git a/progress/git-status-phase-10.txt b/progress/git-status-phase-10.txt
-index 21553bd..9f842c5 100644
---- a/progress/git-status-phase-10.txt
-+++ b/progress/git-status-phase-10.txt
-@@ -4,20 +4,59 @@ Changes not staged for commit:
-   (use "git restore <file>..." to discard changes in working directory)
- 	modified:   CLAUDE.md
- 	modified:   config/server.yml
-+	modified:   docs/claude-code-mcp-setup.md
-+	modified:   progress/tree-phase-10.txt
-+	modified:   pyproject.toml
-+	modified:   scripts/check_qdrant.py
-+	modified:   scripts/diagnose.py
-+	modified:   scripts/reindex_vectors.py
- 	modified:   src/project_memory_mcp/app_context.py
--	modified:   src/project_memory_mcp/knowledge/governance.py
--	modified:   src/project_memory_mcp/vector/__init__.py
-+	modified:   src/project_memory_mcp/db/connection.py
-+	modified:   src/project_memory_mcp/models/search_result.py
-+	modified:   src/project_memory_mcp/retrieval/keyword_search.py
-+	modified:   src/project_memory_mcp/retrieval/search.py
-+	modified:   src/project_memory_mcp/tools/handlers.py
-+	modified:   src/project_memory_mcp/tools/search_context.py
-+	modified:   src/project_memory_mcp/vector/indexer.py
-+	modified:   src/project_memory_mcp/vector/qdrant_store.py
- 
- Untracked files:
-   (use "git add <file>..." to include in what will be committed)
--	progress/phase-10-summary.md
--	progress/tree-phase-10.txt
--	scripts/check_qdrant.py
--	scripts/reindex_vectors.py
--	src/project_memory_mcp/vector/embeddings.py
--	src/project_memory_mcp/vector/indexer.py
--	src/project_memory_mcp/vector/qdrant_store.py
--	tests/test_embeddings.py
--	tests/test_vector_indexer.py
-+	progress/git-diff-phase-101.patch
-+	progress/git-diff-phase-102.patch
-+	progress/git-diff-phase-103.patch
-+	progress/git-diff-phase-104.patch
-+	progress/git-diff-phase-105.patch
-+	progress/git-diff-phase-106.patch
-+	progress/git-status-phase-101.txt
-+	progress/git-status-phase-102.txt
-+	progress/git-status-phase-103.txt
-+	progress/git-status-phase-104.txt
-+	progress/git-status-phase-105.txt
-+	progress/git-status-phase-106.txt
-+	progress/phase-101-summary.md
-+	progress/phase-102-summary.md
-+	progress/phase-103-summary.md
-+	progress/phase-104-summary.md
-+	progress/phase-105-summary.md
-+	progress/phase-105b-summary.md
-+	progress/phase-106-summary.md
-+	progress/test-output-phase-101.txt
-+	progress/test-output-phase-102.txt
-+	progress/test-output-phase-103.txt
-+	progress/test-output-phase-104.txt
-+	progress/test-output-phase-105.txt
-+	progress/test-output-phase-106.txt
-+	progress/tree-phase-101.txt
-+	progress/tree-phase-102.txt
-+	progress/tree-phase-103.txt
-+	progress/tree-phase-104.txt
-+	progress/tree-phase-105.txt
-+	progress/tree-phase-106.txt
-+	scripts/keyword_search_demo.py
-+	scripts/kill_mcp_processes.ps1
-+	scripts/mcp_search_smoke.py
-+	scripts/search_context_demo.py
-+	scripts/vector_search_demo.py
- 
- no changes added to commit (use "git add" and/or "git commit -a")
-diff --git a/progress/tree-phase-10.txt b/progress/tree-phase-10.txt
-index 725474d..094ec34 100644
---- a/progress/tree-phase-10.txt
-+++ b/progress/tree-phase-10.txt
-@@ -17,6 +17,13 @@ docs/prompts/review-pending-memory.md
- docs/prompts/task-end-memory-proposal.md
- docs/prompts/task-start-search.md
- progress/git-diff-phase-1.patch
-+progress/git-diff-phase-10.patch
-+progress/git-diff-phase-101.patch
-+progress/git-diff-phase-102.patch
-+progress/git-diff-phase-103.patch
-+progress/git-diff-phase-104.patch
-+progress/git-diff-phase-105.patch
-+progress/git-diff-phase-106.patch
- progress/git-diff-phase-2.patch
- progress/git-diff-phase-25.patch
- progress/git-diff-phase-26.patch
-@@ -50,6 +57,13 @@ progress/git-diff-phase-8.patch
- progress/git-diff-phase-81.patch
- progress/git-diff-phase-82.patch
- progress/git-status-phase-1.txt
-+progress/git-status-phase-10.txt
-+progress/git-status-phase-101.txt
-+progress/git-status-phase-102.txt
-+progress/git-status-phase-103.txt
-+progress/git-status-phase-104.txt
-+progress/git-status-phase-105.txt
-+progress/git-status-phase-106.txt
- progress/git-status-phase-2.txt
- progress/git-status-phase-25.txt
- progress/git-status-phase-26.txt
-@@ -85,6 +99,13 @@ progress/git-status-phase-82.txt
- progress/phase-0-summary.md
- progress/phase-1-summary.md
- progress/phase-10-summary.md
-+progress/phase-101-summary.md
-+progress/phase-102-summary.md
-+progress/phase-103-summary.md
-+progress/phase-104-summary.md
-+progress/phase-105-summary.md
-+progress/phase-105b-summary.md
-+progress/phase-106-summary.md
- progress/phase-2-summary.md
- progress/phase-2.5-summary.md
- progress/phase-2.6-summary.md
-@@ -119,6 +140,13 @@ progress/phase-8-summary.md
- progress/phase-81-summary.md
- progress/phase-82-summary.md
- progress/test-output-phase-1.txt
-+progress/test-output-phase-10.txt
-+progress/test-output-phase-101.txt
-+progress/test-output-phase-102.txt
-+progress/test-output-phase-103.txt
-+progress/test-output-phase-104.txt
-+progress/test-output-phase-105.txt
-+progress/test-output-phase-106.txt
- progress/test-output-phase-2.txt
- progress/test-output-phase-25.txt
- progress/test-output-phase-26.txt
-@@ -152,6 +180,13 @@ progress/test-output-phase-8.txt
- progress/test-output-phase-81.txt
- progress/test-output-phase-82.txt
- progress/tree-phase-1.txt
-+progress/tree-phase-10.txt
-+progress/tree-phase-101.txt
-+progress/tree-phase-102.txt
-+progress/tree-phase-103.txt
-+progress/tree-phase-104.txt
-+progress/tree-phase-105.txt
-+progress/tree-phase-106.txt
- progress/tree-phase-2.txt
- progress/tree-phase-25.txt
- progress/tree-phase-26.txt
-@@ -193,13 +228,18 @@ scripts/cleanup_test_memories.py
- scripts/dev_check.py
- scripts/diagnose.py
- scripts/init_db.py
-+scripts/keyword_search_demo.py
-+scripts/kill_mcp_processes.ps1
- scripts/make_review_pack.py
-+scripts/mcp_search_smoke.py
- scripts/reindex_vectors.py
- scripts/review_memories.py
- scripts/run_demo_flow.py
-+scripts/search_context_demo.py
- scripts/seed_demo_data.py
- scripts/sync_projects.py
- scripts/test_mcp_stdio_client.py
-+scripts/vector_search_demo.py
- src/project_memory_mcp/__init__.py
- src/project_memory_mcp/__main__.py
- src/project_memory_mcp/app_context.py
 diff --git a/pyproject.toml b/pyproject.toml
 index 6c6c2fa..bc58cf3 100644
 --- a/pyproject.toml
@@ -244,7 +29,7 @@ index 6c6c2fa..bc58cf3 100644
  
  [build-system]
 diff --git a/scripts/check_qdrant.py b/scripts/check_qdrant.py
-index e021274..2337b3c 100644
+index e021274..b45a324 100644
 --- a/scripts/check_qdrant.py
 +++ b/scripts/check_qdrant.py
 @@ -65,6 +65,12 @@ def main():
@@ -260,46 +45,7 @@ index e021274..2337b3c 100644
          else:
              print(f"  [INFO] collection '{collection_name}' 尚未创建")
              print(f"  可用 collections: {names}")
-@@ -76,8 +82,43 @@ def main():
-     print(f"\n{'=' * 50}")
-     print("  Qdrant 连接检查通过")
-     print(f"{'=' * 50}")
-+    # 4. warmup (optional)
-+    if "--warmup" in sys.argv:
-+        import time
-+        print("\n[4] warmup")
-+        try:
-+            t0 = time.monotonic()
-+            cnt = client.count(collection_name=collection_name, exact=True)
-+            elapsed = (time.monotonic() - t0) * 1000
-+            n = cnt.count if hasattr(cnt, "count") else "?"
-+            print(f"  count: {n} ({elapsed:.0f}ms)")
-+            if elapsed > 3000:
-+                print(f"  [WARN] count 耗时超过 3s: {elapsed:.0f}ms")
-+
-+            t0 = time.monotonic()
-+            vec = [0.0] * embed_cfg.get("dim", 512)
-+            try:
-+                from qdrant_client.models import Filter
-+                client.query_points(
-+                    collection_name=collection_name,
-+                    query=vec, limit=1,
-+                )
-+                elapsed2 = (time.monotonic() - t0) * 1000
-+                print(f"  query: {elapsed2:.0f}ms")
-+                if elapsed2 > 3000:
-+                    print(f"  [WARN] query_points 耗时超过 3s: {elapsed2:.0f}ms")
-+            except AttributeError:
-+                client.search(
-+                    collection_name=collection_name,
-+                    query_vector=vec, limit=1,
-+                )
-+                elapsed2 = (time.monotonic() - t0) * 1000
-+                print(f"  query (search): {elapsed2:.0f}ms")
-+        except Exception as exc:
-+            print(f"  [FAIL] warmup 失败: {type(exc).__name__}")
-+
-     return 0
+@@ -80,4 +86,4 @@ def main():
  
  
  if __name__ == "__main__":
@@ -435,7 +181,7 @@ index 569c315..b4190e2 100644
 -    main()
 +    raise SystemExit(main())
 diff --git a/src/project_memory_mcp/app_context.py b/src/project_memory_mcp/app_context.py
-index cea19d6..76771fc 100644
+index cea19d6..48a61db 100644
 --- a/src/project_memory_mcp/app_context.py
 +++ b/src/project_memory_mcp/app_context.py
 @@ -78,10 +78,20 @@ class AppContext:
@@ -459,124 +205,22 @@ index cea19d6..76771fc 100644
          )
  
          # 6. 知识治理
-@@ -215,8 +225,11 @@ class AppContext:
- 
-         logging.getLogger("project_memory_mcp").info(
-             "app_context_ready user_version=%s project_count=%s memory_count=%s "
--            "audit_log_count=%s qdrant_enabled=false llm_reviewer_enabled=false",
-+            "audit_log_count=%s qdrant_enabled=%s embedding_enabled=%s search_mode=%s",
-             uv, n_p, n_m, n_a,
-+            "true" if self.vector_store is not None else "false",
-+            "true" if self.embedder is not None else "false",
-+            getattr(self.search_service, "mode", "keyword"),
-         )
- 
-     def sync_projects(self) -> int:
-diff --git a/src/project_memory_mcp/db/connection.py b/src/project_memory_mcp/db/connection.py
-index 4a68380..1c7a60a 100644
---- a/src/project_memory_mcp/db/connection.py
-+++ b/src/project_memory_mcp/db/connection.py
-@@ -21,6 +21,7 @@ class DatabaseConnection:
-         conn.row_factory = sqlite3.Row
-         conn.execute("PRAGMA journal_mode=WAL")
-         conn.execute("PRAGMA foreign_keys=ON")
-+        conn.execute("PRAGMA busy_timeout=5000")
-         run_migrations(conn)
-         self._conn = conn
-         return conn
 diff --git a/src/project_memory_mcp/models/search_result.py b/src/project_memory_mcp/models/search_result.py
-index 5dcad45..3135e37 100644
+index 5dcad45..b05a1c3 100644
 --- a/src/project_memory_mcp/models/search_result.py
 +++ b/src/project_memory_mcp/models/search_result.py
-@@ -33,3 +33,7 @@ class SearchResultSet:
+@@ -33,3 +33,6 @@ class SearchResultSet:
      total_returned: int = 0     # 实际返回总数（截断后）
      search_method: str = "keyword"
      fallback_activated: bool = False
-+    fallback_reason: str = ""
 +    keyword_count: int = 0
 +    vector_count: int = 0
 +    hybrid_count: int = 0
-diff --git a/src/project_memory_mcp/retrieval/keyword_search.py b/src/project_memory_mcp/retrieval/keyword_search.py
-index 996f0d4..eb5e827 100644
---- a/src/project_memory_mcp/retrieval/keyword_search.py
-+++ b/src/project_memory_mcp/retrieval/keyword_search.py
-@@ -1,12 +1,16 @@
- """KeywordSearchService — SQLite LIKE 搜索，参数化查询，多字段打分。"""
- 
- import json
-+import logging
- import re
- import sqlite3
-+import time
- 
- from ..models.search_result import SearchResult
- from .filter_builder import FilterBuilder
- 
-+logger = logging.getLogger("project_memory_mcp")
-+
- _TOKENIZE_RE = re.compile(r"\s+")
- 
- # LIKE 转义字符
-@@ -78,6 +82,9 @@ class KeywordSearchService:
-         keywords = self._tokenize(query)
-         all_results: list[SearchResult] = []
- 
-+        t0 = time.monotonic()
-+        logger.info("keyword_search_started project_id=%s query_len=%d", project_id, len(query))
-+
-         # 1. project scope
-         all_results.extend(
-             self._search_project_scope(
-@@ -85,6 +92,11 @@ class KeywordSearchService:
-                 include_candidates, modules, types, tags, min_confidence, max_results,
-             )
-         )
-+        t1 = time.monotonic()
-+        ms1 = (t1 - t0) * 1000
-+        logger.info("keyword_project_sql_done count=%d elapsed_ms=%.1f", len(all_results), ms1)
-+        if ms1 > 1000:
-+            logger.warning("keyword_sql_slow scope=project elapsed_ms=%.1f", ms1)
- 
-         # 2. shared scope
-         internal_limit = max(max_results * 3, 50)
-@@ -94,12 +106,21 @@ class KeywordSearchService:
-                     keywords, project_id, modules, types, tags, min_confidence, internal_limit,
-                 )
-             )
-+        t2 = time.monotonic()
-+        ms2 = (t2 - t1) * 1000
-+        sc = len(all_results)  # count so far
-+        logger.info("keyword_shared_sql_done elapsed_ms=%.1f", ms2)
-+        if ms2 > 1000:
-+            logger.warning("keyword_sql_slow scope=shared elapsed_ms=%.1f", ms2)
- 
-         # 3. global scope
-         if include_global:
-             all_results.extend(
-                 self._search_global_scope(keywords, modules, types, tags, min_confidence, internal_limit)
-             )
-+        t3 = time.monotonic()
-+        ms3 = (t3 - t2) * 1000
-+        logger.info("keyword_global_sql_done elapsed_ms=%.1f", ms3)
- 
-         # 去重（同 id 取最高分）
-         seen: dict[str, SearchResult] = {}
-@@ -109,7 +130,9 @@ class KeywordSearchService:
- 
-         deduped = list(seen.values())
-         deduped.sort(key=lambda x: -x.relevance_score)
--        # 不在此处截断，由 KnowledgeSearchService 统一按 max_results 截断
-+        t4 = time.monotonic()
-+        ms4 = (t4 - t0) * 1000
-+        logger.info("keyword_search_done total=%d elapsed_ms=%.1f", len(deduped), ms4)
-         return deduped
- 
-     def search_empty(
 diff --git a/src/project_memory_mcp/retrieval/search.py b/src/project_memory_mcp/retrieval/search.py
-index 40782d7..56cc144 100644
+index 40782d7..d7c89cb 100644
 --- a/src/project_memory_mcp/retrieval/search.py
 +++ b/src/project_memory_mcp/retrieval/search.py
-@@ -1,72 +1,66 @@
+@@ -1,72 +1,52 @@
 -"""KnowledgeSearchService — 统一搜索入口：keyword-first + 三级范围检索。"""
 +"""
 +KnowledgeSearchService — 统一搜索入口：keyword-first + vector + hybrid merge。
@@ -586,7 +230,6 @@ index 40782d7..56cc144 100644
 +
 +import logging
  import sqlite3
-+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
  
 -from ..models.search_result import SearchResultSet
 +from ..models.search_result import SearchResultSet, SearchResult
@@ -629,12 +272,6 @@ index 40782d7..56cc144 100644
 +        self.vector_weight = cfg.get("vector_weight", 0.45)
 +        self.vector_top_k = cfg.get("vector_top_k", 30)
 +        self.fallback_to_keyword = cfg.get("fallback_to_keyword", True)
-+        self.min_vector_score = cfg.get("min_vector_score", 0.001)
-+        self.vector_timeout_seconds = cfg.get("vector_timeout_seconds", 3)
-+        self.vector_cooldown_seconds = cfg.get("vector_cooldown_seconds", 60)
-+        self.max_search_seconds = cfg.get("max_search_seconds", 8)
-+        self._vector_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vector-search")
-+        self._vector_cooldown_until: float = 0.0
  
      def search(
 -        self,
@@ -667,13 +304,6 @@ index 40782d7..56cc144 100644
 -        - include_candidates: 是否包含候选/待审核知识
 -        """
 -        # 1. keyword search（主搜索，内部不再截断）
-+        import time
-+        t0 = time.monotonic()
-+        logger.info(
-+            "search_started project_id=%s mode=%s query_len=%d",
-+            project_id, self.mode, len(query) if query else 0,
-+        )
-+
 +        # 1. keyword search (always)
          if query and query.strip():
              keyword_results = self.keyword_search.search(
@@ -689,7 +319,7 @@ index 40782d7..56cc144 100644
                  min_confidence=min_confidence,
                  include_shared=include_shared,
                  include_global=include_global,
-@@ -74,95 +68,232 @@ class KnowledgeSearchService:
+@@ -74,95 +54,137 @@ class KnowledgeSearchService:
              )
          else:
              keyword_results = self.keyword_search.search_empty(
@@ -712,7 +342,6 @@ index 40782d7..56cc144 100644
 +        vector_hits = []
          fallback = False
 -        if self.vector_store is not None and self.embedder is not None:
-+        fallback_reason = ""
 +        search_method = "keyword"
 +
 +        use_vector = (self.mode in ("vector", "hybrid")
@@ -720,77 +349,39 @@ index 40782d7..56cc144 100644
 +                      and self.embedder is not None
 +                      and query and query.strip())
 +
-+        # cooldown: skip vector if recently timed out
-+        if use_vector and time.monotonic() < self._vector_cooldown_until:
-+            logger.info("vector_cooldown: skipping, cooldown_until=%.0f", self._vector_cooldown_until)
-+            use_vector = False
-+            fallback = True
-+            fallback_reason = "vector_cooldown"
-+
 +        if use_vector:
-+            t_vec_start = time.monotonic()
-+            logger.info("vector_started request_id=... project=%s query_len=%d top_k=%d",
-+                        project_id, len(query) if query else 0, self.vector_top_k)
-+
-+            # Run in worker thread for true timeout
-+            def _vector_worker():
-+                w_vec = []
-+                w_embed = self.embedder.embed_text(query)
-+                logger.info("vector_embed_done dim=%d", len(w_embed) if w_embed else 0)
-+                for scope_name, sf in [("project", True), ("shared", include_shared), ("global", include_global)]:
-+                    if not sf:
-+                        continue
-+                    w_hits = self.vector_store.search(w_embed, project_id, scope_filter=scope_name, top_k=self.vector_top_k)
-+                    logger.info("qdrant_query_done scope=%s hit_count=%d", scope_name, len(w_hits))
-+                    w_vec.extend(w_hits)
-+                return w_vec
-+
-+            future = self._vector_executor.submit(_vector_worker)
              try:
 -                if await_check(self.vector_store) and query and query.strip():
 -                    # TODO: Phase 7 Qdrant 集成
 -                    pass
 -            except Exception:
-+                vector_hits = future.result(timeout=self.vector_timeout_seconds)
-+                logger.info("vector_worker_done hit_count=%d elapsed_ms=%.1f",
-+                            len(vector_hits), (time.monotonic() - t_vec_start) * 1000)
-+                if self.mode == "hybrid":
-+                    search_method = "hybrid"
-+                else:
-+                    search_method = "vector"
-+            except FutureTimeoutError:
-+                logger.warning("vector_search_timeout elapsed_ms=%.1f fallback_to_keyword",
-+                               (time.monotonic() - t_vec_start) * 1000)
-+                future.cancel()
-+                fallback = True
-+                fallback_reason = "vector_timeout"
-+                self._vector_cooldown_until = time.monotonic() + self.vector_cooldown_seconds
-+                vector_hits = []
++                vec = self.embedder.embed_text(query)
++                for scope_name, scope_flag in [("project", include_candidates), ("shared", include_shared), ("global", include_global)]:
++                    if scope_name == "project":
++                        hits = self.vector_store.search(vec, project_id, scope_filter="project", top_k=self.vector_top_k)
++                    elif scope_flag:
++                        hits = self.vector_store.search(vec, project_id, scope_filter=scope_name, top_k=self.vector_top_k // 2)
++                    else:
++                        continue
++                    vector_hits.extend(hits)
 +            except Exception as exc:
-+                logger.warning("vector_search_failed exc_type=%s", type(exc).__name__)
++                logger.warning("vector_search_failed: %s, fallback to keyword", exc)
                  fallback = True
-+                fallback_reason = f"vector_error: {type(exc).__name__}"
 +                if not self.fallback_to_keyword:
 +                    vector_hits = []
++            else:
++                if self.mode == "hybrid" and not fallback:
++                    search_method = "hybrid"
++                elif self.mode == "vector" and not fallback:
++                    search_method = "vector"
  
 -        # 3. 合并去重排序
 -        merged = self.ranker.merge(keyword_results, semantic_results)
 -        total_found = len(merged)
 +        # 3. Convert vector hits to SearchResults
-+        t_kw = time.monotonic()
-+        logger.info("keyword_done keyword_count=%d elapsed_ms=%.1f", len(keyword_results), (t_kw - t0) * 1000)
-+
 +        semantic_results = []
 +        if vector_hits:
-+            semantic_results = self._vector_hits_to_items(
-+                vector_hits, project_id, query,
-+                include_shared=include_shared, include_global=include_global,
-+                include_candidates=include_candidates,
-+                modules=modules, types=types, tags=tags,
-+                min_confidence=min_confidence,
-+            )
-+        t_vec = time.monotonic()
-+        logger.info("vector_done vector_count=%d elapsed_ms=%.1f", len(semantic_results), (t_vec - t_kw) * 1000)
++            semantic_results = self._vector_hits_to_items(vector_hits, project_id, query)
 +
 +        # 4. Hybrid merge
 +        keyword_count = len(keyword_results)
@@ -808,12 +399,6 @@ index 40782d7..56cc144 100644
          limited = merged[:max_results]
          cp = self.ranker.build_context_pack(limited, query, project_id)
  
-+        logger.info(
-+            "search_done total_returned=%d total_found=%d elapsed_ms=%.1f fallback=%s method=%s",
-+            len(limited), total_found, (time.monotonic() - t0) * 1000,
-+            fallback, search_method,
-+        )
-+
          return SearchResultSet(
 -            query=query,
 -            project_id=project_id,
@@ -864,81 +449,31 @@ index 40782d7..56cc144 100644
 -            fallback_activated=fallback,
 +            total_found=total_found, total_returned=len(limited),
 +            search_method=search_method, fallback_activated=fallback,
-+            fallback_reason=fallback_reason,
 +            keyword_count=keyword_count, vector_count=vector_count, hybrid_count=hybrid_count,
          )
  
-+    def _vector_hits_to_items(self, hits, project_id, query,
-+                               include_shared=True, include_global=True,
-+                               include_candidates=False,
-+                               modules=None, types=None, tags=None,
-+                               min_confidence=None):
-+        """将 Qdrant hits 转为 SearchResult，回 SQLite 读取完整内容。
-+
-+        应用与 keyword search 一致的权限和过滤条件。
-+        """
++    def _vector_hits_to_items(self, hits, project_id, query):
++        """将 Qdrant hits 转为 SearchResult，回 SQLite 读取完整内容。"""
 +        from ..db.memory_repo import MemoryRepository
 +        repo = MemoryRepository(self.conn)
 +        items = []
 +        seen = set()
-+
-+        # 模块/类型/标签快速查找集合
-+        module_set = set(m.lower() for m in modules) if modules else None
-+        type_set = set(t.lower() for t in types) if types else None
-+        tag_set = set(t.lower() for t in tags) if tags else None
-+
 +        for hit in hits:
 +            mid = hit.get("id", "")
 +            if mid in seen:
 +                continue
 +            seen.add(mid)
-+
-+            score = hit.get("score", 0.0)
-+            if score < self.min_vector_score:
-+                continue
-+
 +            memory = repo.get_by_id(mid)
-+            if memory is None:
++            if memory is None or memory.status != "approved":
 +                continue
-+
-+            # 状态过滤
-+            if not include_candidates and memory.status not in ("approved",):
-+                continue
-+            if include_candidates and memory.status in ("rejected", "deprecated", "superseded", "conflict"):
-+                continue
-+            if not include_candidates and memory.status != "approved":
-+                continue
-+
-+            # scope 权限
 +            if memory.scope == "project" and memory.project_id != project_id:
 +                continue
-+            if memory.scope == "shared":
-+                if not include_shared:
-+                    continue
-+                if memory.allowed_projects and project_id not in memory.allowed_projects:
-+                    continue
-+                if memory.denied_projects and project_id in memory.denied_projects:
-+                    continue
-+            if memory.scope == "global":
-+                if not include_global:
-+                    continue
-+
-+            # 模块/类型/标签/min_confidence 过滤
-+            if module_set and memory.module.lower() not in module_set:
-+                continue
-+            if type_set and memory.type.lower() not in type_set:
-+                continue
-+            if tag_set and not any(t.lower() in tag_set for t in (memory.tags or [])):
-+                continue
-+            if min_confidence is not None and memory.confidence < min_confidence:
-+                continue
-+
 +            items.append(SearchResult(
 +                id=memory.id, title=memory.title, content=memory.content,
 +                type=memory.type, module=memory.module, scope=memory.scope,
 +                confidence=memory.confidence, risk_level=memory.risk_level,
 +                tags=memory.tags, source_evidence=memory.source_evidence,
-+                match_type="vector", relevance_score=score,
++                match_type="vector", relevance_score=hit.get("score", 0.0),
 +                from_project=memory.project_id,
 +            ))
 +        return items
@@ -993,38 +528,6 @@ index 40782d7..56cc144 100644
 +            "match_type": i.match_type, "relevance_score": i.relevance_score,
 +            "from_project": i.from_project,
 +        }
-diff --git a/src/project_memory_mcp/tools/handlers.py b/src/project_memory_mcp/tools/handlers.py
-index bddf7c0..ed6c6d5 100644
---- a/src/project_memory_mcp/tools/handlers.py
-+++ b/src/project_memory_mcp/tools/handlers.py
-@@ -154,6 +154,12 @@ class ToolHandler:
-     def _dispatch(self, tool: str, module_name: str, params: dict) -> dict:
-         request_id = new_request_id()
-         _log_tool_start(tool, request_id, params)
-+
-+        pid = params.get("project_id") or "?"
-+        logger.info("tool_started request_id=%s tool=%s project=%s query_len=%d",
-+                     request_id, tool, pid,
-+                     len(str(params.get("query", ""))) if "query" in params else 0)
-+
-         t0 = time.monotonic()
- 
-         try:
-@@ -181,10 +187,14 @@ class ToolHandler:
-         if result.get("ok"):
-             result["request_id"] = request_id
-             _log_tool_success(tool, request_id, duration_ms)
-+            logger.info("tool_done request_id=%s tool=%s elapsed_ms=%.1f ok=true",
-+                        request_id, tool, duration_ms)
-         else:
-             result["request_id"] = request_id
-             code = result.get("error", {}).get("code", "unknown")
-             _log_tool_error(tool, request_id, code, duration_ms)
-+            logger.info("tool_done request_id=%s tool=%s elapsed_ms=%.1f ok=false code=%s",
-+                        request_id, tool, duration_ms, code)
- 
-         # 搜索诊断日志
-         if tool == "search_project_context" and result.get("ok"):
 diff --git a/src/project_memory_mcp/tools/search_context.py b/src/project_memory_mcp/tools/search_context.py
 index 76f03f3..50d7d56 100644
 --- a/src/project_memory_mcp/tools/search_context.py

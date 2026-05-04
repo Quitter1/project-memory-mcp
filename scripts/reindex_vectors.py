@@ -33,23 +33,26 @@ def main():
     try:
         if ctx.vector_indexer is None:
             print("向量索引未启用 (qdrant.enabled=false 或 embedding 不可用)")
-            return
+            return 1
 
-        ctx.vector_store.ensure_collection()
+        try:
+            ctx.vector_store.ensure_collection()
+        except Exception as exc:
+            print(f"Qdrant collection 创建失败: {exc}")
+            return 1
 
         if args.yes:
-            result = ctx.vector_indexer.reindex_all(project_id=args.project, dry_run=False)
+            result = ctx.vector_indexer.reindex_all(
+                project_id=args.project, dry_run=False,
+                project_repo=ctx.project_repo,
+            )
         else:
-            # 只用 memory_repo 统计
-            if args.project:
-                items = ctx.memory_repo.list_memories(project_id=args.project, limit=10000)
-            else:
-                all_projects = ctx.config_loader.list_active_projects()
-                items = []
-                for prj in all_projects:
-                    items.extend(ctx.memory_repo.list_memories(project_id=prj.id, limit=10000))
-            approved = [m for m in items if m.status == "approved"]
-            result = {"eligible": len(approved), "indexed": 0, "failed": 0, "skipped": 0}
+            result = ctx.vector_indexer.reindex_all(
+                project_id=args.project, dry_run=True,
+                project_repo=ctx.project_repo,
+            )
+            result["indexed"] = 0
+            result["failed"] = 0
 
         print(f"eligible: {result['eligible']}")
         if not args.yes:
@@ -62,4 +65,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

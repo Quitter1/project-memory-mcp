@@ -4,18 +4,13 @@ Changes not staged for commit:
   (use "git restore <file>..." to discard changes in working directory)
 	modified:   CLAUDE.md
 	modified:   config/server.yml
-	modified:   docs/claude-code-mcp-setup.md
-	modified:   progress/tree-phase-10.txt
 	modified:   pyproject.toml
 	modified:   scripts/check_qdrant.py
 	modified:   scripts/diagnose.py
 	modified:   scripts/reindex_vectors.py
 	modified:   src/project_memory_mcp/app_context.py
-	modified:   src/project_memory_mcp/db/connection.py
 	modified:   src/project_memory_mcp/models/search_result.py
-	modified:   src/project_memory_mcp/retrieval/keyword_search.py
 	modified:   src/project_memory_mcp/retrieval/search.py
-	modified:   src/project_memory_mcp/tools/handlers.py
 	modified:   src/project_memory_mcp/tools/search_context.py
 	modified:   src/project_memory_mcp/vector/indexer.py
 	modified:   src/project_memory_mcp/vector/qdrant_store.py
@@ -25,38 +20,20 @@ Untracked files:
 	progress/git-diff-phase-101.patch
 	progress/git-diff-phase-102.patch
 	progress/git-diff-phase-103.patch
-	progress/git-diff-phase-104.patch
-	progress/git-diff-phase-105.patch
-	progress/git-diff-phase-106.patch
 	progress/git-status-phase-101.txt
 	progress/git-status-phase-102.txt
 	progress/git-status-phase-103.txt
-	progress/git-status-phase-104.txt
-	progress/git-status-phase-105.txt
-	progress/git-status-phase-106.txt
 	progress/phase-101-summary.md
 	progress/phase-102-summary.md
 	progress/phase-103-summary.md
 	progress/phase-104-summary.md
-	progress/phase-105-summary.md
-	progress/phase-105b-summary.md
-	progress/phase-106-summary.md
 	progress/test-output-phase-101.txt
 	progress/test-output-phase-102.txt
 	progress/test-output-phase-103.txt
-	progress/test-output-phase-104.txt
-	progress/test-output-phase-105.txt
-	progress/test-output-phase-106.txt
 	progress/tree-phase-101.txt
 	progress/tree-phase-102.txt
 	progress/tree-phase-103.txt
 	progress/tree-phase-104.txt
-	progress/tree-phase-105.txt
-	progress/tree-phase-106.txt
-	scripts/keyword_search_demo.py
-	scripts/kill_mcp_processes.ps1
-	scripts/mcp_search_smoke.py
-	scripts/search_context_demo.py
 	scripts/vector_search_demo.py
 
 no changes added to commit (use "git add" and/or "git commit -a")

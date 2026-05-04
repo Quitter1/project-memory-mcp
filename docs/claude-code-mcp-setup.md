@@ -59,4 +59,29 @@ python scripts/diagnose.py
 | 没有 `memory.db` | `python scripts/init_db.py && python scripts/sync_projects.py` |
 | MCP 启动后"卡住" | 正常 — stdio server 在等待客户端请求 |
 | Claude Code 看不到 tools | 检查 command/args/env，查看 `logs/errors.log` |
+| MCP 搜索慢/卡住 | 更新代码或配置后必须重启 Claude Code 清理旧进程 |
+
+## 更新代码/配置后必须重启
+
+修改 `config/server.yml` 或更新 Python 代码后，Claude Code 可能仍连接旧的 MCP server 进程。
+
+清理方法（Windows PowerShell）：
+
+```powershell
+# 查看残留进程
+powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1
+
+# 终止残留进程
+powershell -ExecutionPolicy Bypass -File scripts/kill_mcp_processes.ps1 -Kill
+```
+
+或手动：
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match "project_memory_mcp" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+清理后 Claude Code 下次调用 MCP 时会重新启动 server。
 | `project_not_found` | 确保 `config/projects.yml` 包含对应项目 |

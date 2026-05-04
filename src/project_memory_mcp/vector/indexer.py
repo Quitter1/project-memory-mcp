@@ -57,10 +57,28 @@ class VectorIndexer:
                     "updated_at": memory.updated_at or "",
                 },
             )
+            # 更新 SQLite index_status
+            try:
+                self.memory_repo.conn.execute(
+                    "UPDATE memory_items SET index_status='indexed', updated_at=datetime('now') WHERE id=?",
+                    (memory.id,),
+                )
+                self.memory_repo.conn.commit()
+            except Exception:
+                pass
+
             logger.info("vector_indexed: memory_id=%s", memory.id)
             return True
         except Exception as exc:
             logger.error("vector_index_failed: memory_id=%s exc_type=%s", memory.id, type(exc).__name__)
+            try:
+                self.memory_repo.conn.execute(
+                    "UPDATE memory_items SET index_status='index_failed', updated_at=datetime('now') WHERE id=?",
+                    (memory.id,),
+                )
+                self.memory_repo.conn.commit()
+            except Exception:
+                pass
             return False
 
     def delete_memory(self, memory_id: str) -> bool:
@@ -74,22 +92,36 @@ class VectorIndexer:
             logger.error("vector_delete_failed: memory_id=%s exc_type=%s", memory_id, type(exc).__name__)
             return False
 
-    def reindex_all(self, project_id: str | None = None, dry_run: bool = False) -> dict:
-        """重建所有 approved 知识的向量索引。"""
-        if not self._enabled:
-            return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
+    def reindex_all(self, project_id: str | None = None, dry_run: bool = False,
+                    project_repo=None) -> dict:
+        """重建所有 approved 知识的向量索引。
 
+        project_id 不传时遍历 project_repo 所有 active 项目。
+        """
         eligible = 0
         indexed = 0
         failed = 0
+        skipped = 0
+
+        if not self._enabled:
+            return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
 
         if project_id:
-            items = self.memory_repo.list_memories(project_id=project_id, limit=10000)
+            items = self.memory_repo.list_memories(
+                project_id=project_id, status_filter=["approved"], limit=10000,
+            )
         else:
-            items = self.memory_repo.list_memories(status_filter=["approved"], limit=10000)
-            if not project_id:
-                # filter approved manually when listing all
-                pass
+            items = []
+            if project_repo is not None:
+                try:
+                    for p in project_repo.list_active():
+                        items.extend(self.memory_repo.list_memories(
+                            project_id=p.id, status_filter=["approved"], limit=5000,
+                        ))
+                except AttributeError:
+                    pass
+            if not items:
+                return {"eligible": 0, "indexed": 0, "failed": 0, "skipped": 0}
 
         approved_items = [m for m in items if m.status == "approved"]
         eligible = len(approved_items)
@@ -105,5 +137,8 @@ class VectorIndexer:
             else:
                 failed += 1
 
-        logger.info("reindex_complete: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
+        if failed > 0:
+            logger.warning("reindex_with_errors: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
+        else:
+            logger.info("reindex_complete: eligible=%d indexed=%d failed=%d", eligible, indexed, failed)
         return {"eligible": eligible, "indexed": indexed, "failed": failed, "skipped": 0}
